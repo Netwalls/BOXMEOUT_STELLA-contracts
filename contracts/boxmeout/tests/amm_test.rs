@@ -609,7 +609,7 @@ fn test_get_odds() {
 fn test_add_liquidity() {
     let env = create_test_env();
     let amm_id = register_amm(&env);
-    let client = AMMContractClient::new(&env, &amm_id);
+    let client = AMMClient::new(&env, &amm_id);
 
     // Initialize AMM
     let admin = Address::generate(&env);
@@ -624,7 +624,7 @@ fn test_add_liquidity() {
     let market_id = BytesN::from_array(&env, &[1u8; 32]);
     let initial_liquidity = 10_000_000_000u128;
 
-    let token_client = token::StellarAssetClient::new(&env, &usdc_token);
+    let token_client = StellarAssetClient::new(&env, &usdc_token);
     token_client.mint(&creator, &(initial_liquidity as i128));
     client.create_pool(&creator, &market_id, &initial_liquidity);
 
@@ -647,7 +647,7 @@ fn test_add_liquidity() {
 fn test_add_liquidity_maintains_ratio() {
     let env = create_test_env();
     let amm_id = register_amm(&env);
-    let client = AMMContractClient::new(&env, &amm_id);
+    let client = AMMClient::new(&env, &amm_id);
 
     // Initialize AMM
     let admin = Address::generate(&env);
@@ -662,7 +662,7 @@ fn test_add_liquidity_maintains_ratio() {
     let market_id = BytesN::from_array(&env, &[1u8; 32]);
     let initial_liquidity = 10_000_000_000u128;
 
-    let token_client = token::StellarAssetClient::new(&env, &usdc_token);
+    let token_client = StellarAssetClient::new(&env, &usdc_token);
     token_client.mint(&creator, &(initial_liquidity as i128));
     client.create_pool(&creator, &market_id, &initial_liquidity);
 
@@ -683,14 +683,13 @@ fn test_add_liquidity_maintains_ratio() {
 fn test_add_liquidity_pool_not_exist() {
     let env = create_test_env();
     let amm_id = register_amm(&env);
-    let client = AMMContractClient::new(&env, &amm_id);
+    let client = AMMClient::new(&env, &amm_id);
 
     // Initialize AMM
     let admin = Address::generate(&env);
     let factory = Address::generate(&env);
-    let usdc_token = create_mock_token(&env, &admin);
+    let usdc_token = setup_usdc_token(&env, &admin, 100_000_000_000);
     let max_liquidity_cap = 100_000_000_000u128;
-    env.mock_all_auths();
     client.initialize(&admin, &factory, &usdc_token, &max_liquidity_cap);
 
     // Try to add liquidity to non-existent pool
@@ -706,7 +705,7 @@ fn test_add_liquidity_pool_not_exist() {
 fn test_add_liquidity_zero_amount() {
     let env = create_test_env();
     let amm_id = register_amm(&env);
-    let client = AMMContractClient::new(&env, &amm_id);
+    let client = AMMClient::new(&env, &amm_id);
 
     // Initialize AMM
     let admin = Address::generate(&env);
@@ -721,7 +720,7 @@ fn test_add_liquidity_zero_amount() {
     let market_id = BytesN::from_array(&env, &[1u8; 32]);
     let initial_liquidity = 10_000_000_000u128;
 
-    let token_client = token::StellarAssetClient::new(&env, &usdc_token);
+    let token_client = StellarAssetClient::new(&env, &usdc_token);
     token_client.mint(&creator, &(initial_liquidity as i128));
     client.create_pool(&creator, &market_id, &initial_liquidity);
 
@@ -734,7 +733,7 @@ fn test_add_liquidity_zero_amount() {
 fn test_add_liquidity_event_emitted() {
     let env = create_test_env();
     let amm_id = register_amm(&env);
-    let client = AMMContractClient::new(&env, &amm_id);
+    let client = AMMClient::new(&env, &amm_id);
 
     // Initialize AMM
     let admin = Address::generate(&env);
@@ -749,7 +748,7 @@ fn test_add_liquidity_event_emitted() {
     let market_id = BytesN::from_array(&env, &[1u8; 32]);
     let initial_liquidity = 10_000_000_000u128;
 
-    let token_client = token::StellarAssetClient::new(&env, &usdc_token);
+    let token_client = StellarAssetClient::new(&env, &usdc_token);
     token_client.mint(&creator, &(initial_liquidity as i128));
     client.create_pool(&creator, &market_id, &initial_liquidity);
 
@@ -767,10 +766,172 @@ fn test_add_liquidity_event_emitted() {
 
 #[test]
 fn test_remove_liquidity() {
-    // TODO: Implement when remove_liquidity is ready
-    // Test removing liquidity
-    // Test LP token burning
-    // Test proportional payout
+    let env = create_test_env();
+    let amm_id = register_amm(&env);
+    let client = AMMClient::new(&env, &amm_id);
+
+    // Initialize AMM
+    let admin = Address::generate(&env);
+    let factory = Address::generate(&env);
+    let usdc_token = setup_usdc_token(&env, &admin, 100_000_000_000);
+    let max_liquidity_cap = 100_000_000_000u128;
+    client.initialize(&admin, &factory, &usdc_token, &max_liquidity_cap);
+
+    // Create initial pool
+    let creator = Address::generate(&env);
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let initial_liquidity = 10_000_000_000u128;
+
+    let token_client = StellarAssetClient::new(&env, &usdc_token);
+    token_client.mint(&creator, &(initial_liquidity as i128));
+    client.create_pool(&creator, &market_id, &initial_liquidity);
+
+    // Add liquidity from second LP
+    let lp2 = Address::generate(&env);
+    let additional_liquidity = 10_000_000_000u128;
+    token_client.mint(&lp2, &(additional_liquidity as i128));
+    let lp_tokens = client.add_liquidity(&lp2, &market_id, &additional_liquidity);
+
+    // Remove half of lp2's liquidity
+    let tokens_to_remove = lp_tokens / 2;
+    let (yes_amount, no_amount) = client.remove_liquidity(&lp2, &market_id, &tokens_to_remove);
+
+    // Should receive proportional amounts
+    assert!(yes_amount > 0);
+    assert!(no_amount > 0);
+    assert_eq!(yes_amount + no_amount, tokens_to_remove);
+}
+
+#[test]
+#[should_panic(expected = "insufficient lp tokens")]
+fn test_remove_liquidity_more_than_owned() {
+    let env = create_test_env();
+    let amm_id = register_amm(&env);
+    let client = AMMClient::new(&env, &amm_id);
+
+    // Initialize AMM
+    let admin = Address::generate(&env);
+    let factory = Address::generate(&env);
+    let usdc_token = setup_usdc_token(&env, &admin, 100_000_000_000);
+    let max_liquidity_cap = 100_000_000_000u128;
+    client.initialize(&admin, &factory, &usdc_token, &max_liquidity_cap);
+
+    // Create initial pool
+    let creator = Address::generate(&env);
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let initial_liquidity = 10_000_000_000u128;
+
+    let token_client = StellarAssetClient::new(&env, &usdc_token);
+    token_client.mint(&creator, &(initial_liquidity as i128));
+    client.create_pool(&creator, &market_id, &initial_liquidity);
+
+    // Try to remove more LP tokens than owned
+    let lp2 = Address::generate(&env);
+    client.remove_liquidity(&lp2, &market_id, &5_000_000_000u128);
+}
+
+#[test]
+fn test_remove_liquidity_proportional_calculation() {
+    let env = create_test_env();
+    let amm_id = register_amm(&env);
+    let client = AMMClient::new(&env, &amm_id);
+
+    // Initialize AMM
+    let admin = Address::generate(&env);
+    let factory = Address::generate(&env);
+    let usdc_token = setup_usdc_token(&env, &admin, 100_000_000_000);
+    let max_liquidity_cap = 100_000_000_000u128;
+    client.initialize(&admin, &factory, &usdc_token, &max_liquidity_cap);
+
+    // Create initial pool
+    let creator = Address::generate(&env);
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let initial_liquidity = 10_000_000_000u128;
+
+    let token_client = StellarAssetClient::new(&env, &usdc_token);
+    token_client.mint(&creator, &(initial_liquidity as i128));
+    client.create_pool(&creator, &market_id, &initial_liquidity);
+
+    // Remove all creator's liquidity (except can't drain completely)
+    // So remove almost all
+    let tokens_to_remove = initial_liquidity - 1000; // Leave some to avoid drain check
+    let (yes_amount, no_amount) = client.remove_liquidity(&creator, &market_id, &tokens_to_remove);
+
+    // With 50/50 split, should get back approximately equal amounts
+    // yes_amount + no_amount should equal tokens_to_remove
+    assert_eq!(yes_amount + no_amount, tokens_to_remove);
+    
+    // In a 50/50 pool, yes and no should be roughly equal
+    let diff = if yes_amount > no_amount {
+        yes_amount - no_amount
+    } else {
+        no_amount - yes_amount
+    };
+    // Allow small rounding difference
+    assert!(diff <= 1);
+}
+
+#[test]
+fn test_remove_liquidity_event_emitted() {
+    let env = create_test_env();
+    let amm_id = register_amm(&env);
+    let client = AMMClient::new(&env, &amm_id);
+
+    // Initialize AMM
+    let admin = Address::generate(&env);
+    let factory = Address::generate(&env);
+    let usdc_token = setup_usdc_token(&env, &admin, 100_000_000_000);
+    let max_liquidity_cap = 100_000_000_000u128;
+    client.initialize(&admin, &factory, &usdc_token, &max_liquidity_cap);
+
+    // Create initial pool
+    let creator = Address::generate(&env);
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let initial_liquidity = 10_000_000_000u128;
+
+    let token_client = StellarAssetClient::new(&env, &usdc_token);
+    token_client.mint(&creator, &(initial_liquidity as i128));
+    client.create_pool(&creator, &market_id, &initial_liquidity);
+
+    // Add liquidity
+    let lp2 = Address::generate(&env);
+    let additional_liquidity = 5_000_000_000u128;
+    token_client.mint(&lp2, &(additional_liquidity as i128));
+    let lp_tokens = client.add_liquidity(&lp2, &market_id, &additional_liquidity);
+
+    // Remove liquidity
+    client.remove_liquidity(&lp2, &market_id, &lp_tokens);
+
+    // Verify LiquidityRemoved event was emitted
+    let events = env.events().all();
+    assert!(events.len() >= 1, "LiquidityRemoved event should be emitted");
+}
+
+#[test]
+#[should_panic(expected = "lp tokens must be positive")]
+fn test_remove_liquidity_zero_amount() {
+    let env = create_test_env();
+    let amm_id = register_amm(&env);
+    let client = AMMClient::new(&env, &amm_id);
+
+    // Initialize AMM
+    let admin = Address::generate(&env);
+    let factory = Address::generate(&env);
+    let usdc_token = setup_usdc_token(&env, &admin, 100_000_000_000);
+    let max_liquidity_cap = 100_000_000_000u128;
+    client.initialize(&admin, &factory, &usdc_token, &max_liquidity_cap);
+
+    // Create initial pool
+    let creator = Address::generate(&env);
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let initial_liquidity = 10_000_000_000u128;
+
+    let token_client = StellarAssetClient::new(&env, &usdc_token);
+    token_client.mint(&creator, &(initial_liquidity as i128));
+    client.create_pool(&creator, &market_id, &initial_liquidity);
+
+    // Try to remove zero LP tokens
+    client.remove_liquidity(&creator, &market_id, &0u128);
 }
 
 #[test]

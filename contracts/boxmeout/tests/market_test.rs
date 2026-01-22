@@ -28,7 +28,7 @@ fn create_test_env() -> Env {
 
 // Helper to register market contract
 fn register_market(env: &Env) -> Address {
-    env.register_contract(None, boxmeout::PredictionMarket)
+    env.register(boxmeout::PredictionMarket, ())
 }
 
 // Helper to create and register a mock USDC token
@@ -66,11 +66,14 @@ fn setup_test_market(
     // Mock all auth for the test environment
     env.mock_all_auths();
 
+    let oracle = Address::generate(env);
+
     client.initialize(
         &market_id,
         &creator,
         &factory,
         &usdc_address,
+        &oracle,
         &closing_time,
         &resolution_time,
     );
@@ -95,11 +98,14 @@ fn test_market_initialize() {
     // Mock auth for test
     env.mock_all_auths();
 
+    let oracle = Address::generate(&env);
+
     client.initialize(
         &market_id,
         &creator,
         &factory,
         &usdc_token,
+        &oracle,
         &closing_time,
         &resolution_time,
     );
