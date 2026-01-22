@@ -199,9 +199,162 @@ fn test_get_odds() {
 
 #[test]
 fn test_add_liquidity() {
-    // TODO: Implement when add_liquidity is ready
-    // Test adding liquidity to existing pool
-    // Test LP token minting
+    let env = create_test_env();
+    let amm_id = register_amm(&env);
+    let client = AMMContractClient::new(&env, &amm_id);
+
+    // Initialize AMM
+    let admin = Address::generate(&env);
+    let factory = Address::generate(&env);
+    let usdc_token = create_mock_token(&env, &admin);
+    let max_liquidity_cap = 100_000_000_000u128;
+    env.mock_all_auths();
+    client.initialize(&admin, &factory, &usdc_token, &max_liquidity_cap);
+
+    // Create initial pool
+    let creator = Address::generate(&env);
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let initial_liquidity = 10_000_000_000u128;
+
+    let token_client = token::StellarAssetClient::new(&env, &usdc_token);
+    token_client.mint(&creator, &(initial_liquidity as i128));
+    client.create_pool(&creator, &market_id, &initial_liquidity);
+
+    // Add liquidity from second LP
+    let lp2 = Address::generate(&env);
+    let additional_liquidity = 5_000_000_000u128;
+    token_client.mint(&lp2, &(additional_liquidity as i128));
+
+    let lp_tokens = client.add_liquidity(&lp2, &market_id, &additional_liquidity);
+
+    // LP tokens should be proportional: (5000 / 10000) * 10000 = 5000
+    assert_eq!(lp_tokens, 5_000_000_000u128);
+
+    // Verify event emitted
+    let events = env.events().all();
+    assert!(events.len() > 0);
+}
+
+#[test]
+fn test_add_liquidity_maintains_ratio() {
+    let env = create_test_env();
+    let amm_id = register_amm(&env);
+    let client = AMMContractClient::new(&env, &amm_id);
+
+    // Initialize AMM
+    let admin = Address::generate(&env);
+    let factory = Address::generate(&env);
+    let usdc_token = create_mock_token(&env, &admin);
+    let max_liquidity_cap = 100_000_000_000u128;
+    env.mock_all_auths();
+    client.initialize(&admin, &factory, &usdc_token, &max_liquidity_cap);
+
+    // Create initial pool
+    let creator = Address::generate(&env);
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let initial_liquidity = 10_000_000_000u128;
+
+    let token_client = token::StellarAssetClient::new(&env, &usdc_token);
+    token_client.mint(&creator, &(initial_liquidity as i128));
+    client.create_pool(&creator, &market_id, &initial_liquidity);
+
+    // Add liquidity multiple times
+    let lp2 = Address::generate(&env);
+    let additional_liquidity = 1_000_000_000u128;
+    token_client.mint(&lp2, &(additional_liquidity as i128 * 3));
+
+    client.add_liquidity(&lp2, &market_id, &additional_liquidity);
+    client.add_liquidity(&lp2, &market_id, &additional_liquidity);
+    client.add_liquidity(&lp2, &market_id, &additional_liquidity);
+
+    // Should maintain 50/50 ratio throughout
+}
+
+#[test]
+#[should_panic(expected = "pool does not exist")]
+fn test_add_liquidity_pool_not_exist() {
+    let env = create_test_env();
+    let amm_id = register_amm(&env);
+    let client = AMMContractClient::new(&env, &amm_id);
+
+    // Initialize AMM
+    let admin = Address::generate(&env);
+    let factory = Address::generate(&env);
+    let usdc_token = create_mock_token(&env, &admin);
+    let max_liquidity_cap = 100_000_000_000u128;
+    env.mock_all_auths();
+    client.initialize(&admin, &factory, &usdc_token, &max_liquidity_cap);
+
+    // Try to add liquidity to non-existent pool
+    let lp = Address::generate(&env);
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let liquidity_amount = 1_000_000_000u128;
+
+    client.add_liquidity(&lp, &market_id, &liquidity_amount);
+}
+
+#[test]
+#[should_panic(expected = "liquidity amount must be positive")]
+fn test_add_liquidity_zero_amount() {
+    let env = create_test_env();
+    let amm_id = register_amm(&env);
+    let client = AMMContractClient::new(&env, &amm_id);
+
+    // Initialize AMM
+    let admin = Address::generate(&env);
+    let factory = Address::generate(&env);
+    let usdc_token = create_mock_token(&env, &admin);
+    let max_liquidity_cap = 100_000_000_000u128;
+    env.mock_all_auths();
+    client.initialize(&admin, &factory, &usdc_token, &max_liquidity_cap);
+
+    // Create initial pool
+    let creator = Address::generate(&env);
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let initial_liquidity = 10_000_000_000u128;
+
+    let token_client = token::StellarAssetClient::new(&env, &usdc_token);
+    token_client.mint(&creator, &(initial_liquidity as i128));
+    client.create_pool(&creator, &market_id, &initial_liquidity);
+
+    // Try to add zero liquidity
+    let lp2 = Address::generate(&env);
+    client.add_liquidity(&lp2, &market_id, &0u128);
+}
+
+#[test]
+fn test_add_liquidity_event_emitted() {
+    let env = create_test_env();
+    let amm_id = register_amm(&env);
+    let client = AMMContractClient::new(&env, &amm_id);
+
+    // Initialize AMM
+    let admin = Address::generate(&env);
+    let factory = Address::generate(&env);
+    let usdc_token = create_mock_token(&env, &admin);
+    let max_liquidity_cap = 100_000_000_000u128;
+    env.mock_all_auths();
+    client.initialize(&admin, &factory, &usdc_token, &max_liquidity_cap);
+
+    // Create initial pool
+    let creator = Address::generate(&env);
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let initial_liquidity = 10_000_000_000u128;
+
+    let token_client = token::StellarAssetClient::new(&env, &usdc_token);
+    token_client.mint(&creator, &(initial_liquidity as i128));
+    client.create_pool(&creator, &market_id, &initial_liquidity);
+
+    // Add liquidity
+    let lp2 = Address::generate(&env);
+    let additional_liquidity = 5_000_000_000u128;
+    token_client.mint(&lp2, &(additional_liquidity as i128));
+
+    client.add_liquidity(&lp2, &market_id, &additional_liquidity);
+
+    // Verify LiquidityAdded event was emitted
+    let events = env.events().all();
+    assert!(events.len() > 1, "LiquidityAdded event should be emitted");
 }
 
 #[test]

@@ -244,24 +244,127 @@ impl AMM {
 
     /// Add liquidity to existing pool (become LP)
     ///
-    /// TODO: Add Liquidity
-    /// - Validate market_id and pool exists
-    /// - Validate liquidity_amount > 0
-    /// - Query current reserves ratio
-    /// - Calculate fair LP share: (liquidity_input / total_liquidity) * lp_tokens_outstanding
-    /// - Validate not exceeding max_liquidity_cap
-    /// - Transfer USDC from LP to contract
-    /// - Mint LP tokens to LP provider (equal share of fees)
-    /// - Allocate shares proportionally to YES and NO reserves
-    /// - Update total_liquidity
-    /// - Emit LiquidityAdded(lp_address, market_id, amount, lp_tokens_issued)
+    /// Validates pool exists, calculates proportional YES/NO amounts,
+    /// updates reserves and k, mints LP tokens proportional to contribution.
     pub fn add_liquidity(
         env: Env,
         lp_provider: Address,
         market_id: BytesN<32>,
         liquidity_amount: u128,
     ) -> u128 {
-        todo!("See add liquidity TODO above")
+        // Require LP provider authentication
+        lp_provider.require_auth();
+
+        // Validate liquidity_amount > 0
+        if liquidity_amount == 0 {
+            panic!("liquidity amount must be positive");
+        }
+
+        // Check if pool exists for this market
+        let pool_exists_key = (Symbol::new(&env, POOL_EXISTS_PREFIX), &market_id);
+        if !env.storage().persistent().has(&pool_exists_key) {
+            panic!("pool does not exist");
+        }
+
+        // Create storage keys for this pool
+        let yes_reserve_key = (Symbol::new(&env, POOL_YES_RESERVE_PREFIX), &market_id);
+        let no_reserve_key = (Symbol::new(&env, POOL_NO_RESERVE_PREFIX), &market_id);
+        let k_key = (Symbol::new(&env, POOL_K_PREFIX), &market_id);
+        let lp_supply_key = (Symbol::new(&env, POOL_LP_SUPPLY_PREFIX), &market_id);
+        let lp_balance_key = (Symbol::new(&env, POOL_LP_TOKENS_PREFIX), &market_id, &lp_provider);
+
+        // Get current reserves
+        let yes_reserve: u128 = env
+            .storage()
+            .persistent()
+            .get(&yes_reserve_key)
+            .expect("yes reserve not found");
+        let no_reserve: u128 = env
+            .storage()
+            .persistent()
+            .get(&no_reserve_key)
+            .expect("no reserve not found");
+
+        // Get current LP token supply
+        let current_lp_supply: u128 = env
+            .storage()
+            .persistent()
+            .get(&lp_supply_key)
+            .expect("lp supply not found");
+
+        // Calculate total current liquidity
+        let total_liquidity = yes_reserve + no_reserve;
+
+        // Calculate LP tokens to mint proportionally
+        // lp_tokens = (liquidity_amount / total_liquidity) * current_lp_supply
+        let lp_tokens_to_mint = (liquidity_amount * current_lp_supply) / total_liquidity;
+
+        if lp_tokens_to_mint == 0 {
+            panic!("liquidity amount too small");
+        }
+
+        // Split new liquidity proportionally to maintain pool ratio
+        let yes_addition = (liquidity_amount * yes_reserve) / total_liquidity;
+        let no_addition = liquidity_amount - yes_addition;
+
+        // Update reserves
+        let new_yes_reserve = yes_reserve + yes_addition;
+        let new_no_reserve = no_reserve + no_addition;
+
+        // Update k
+        let new_k = new_yes_reserve * new_no_reserve;
+
+        // Check max liquidity cap
+        let max_liquidity_cap: u128 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, MAX_LIQUIDITY_CAP_KEY))
+            .expect("max liquidity cap not set");
+
+        let new_total_liquidity = new_yes_reserve + new_no_reserve;
+        if new_total_liquidity > max_liquidity_cap {
+            panic!("exceeds max liquidity cap");
+        }
+
+        // Store updated reserves and k
+        env.storage().persistent().set(&yes_reserve_key, &new_yes_reserve);
+        env.storage().persistent().set(&no_reserve_key, &new_no_reserve);
+        env.storage().persistent().set(&k_key, &new_k);
+
+        // Update LP token supply
+        let new_lp_supply = current_lp_supply + lp_tokens_to_mint;
+        env.storage().persistent().set(&lp_supply_key, &new_lp_supply);
+
+        // Update LP provider's balance
+        let current_lp_balance: u128 = env
+            .storage()
+            .persistent()
+            .get(&lp_balance_key)
+            .unwrap_or(0);
+        let new_lp_balance = current_lp_balance + lp_tokens_to_mint;
+        env.storage().persistent().set(&lp_balance_key, &new_lp_balance);
+
+        // Transfer USDC from LP provider to contract
+        let usdc_token: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, USDC_KEY))
+            .expect("usdc token not set");
+
+        let token_client = token::Client::new(&env, &usdc_token);
+        token_client.transfer(
+            &lp_provider,
+            &env.current_contract_address(),
+            &(liquidity_amount as i128),
+        );
+
+        // Emit LiquidityAdded event
+        env.events().publish(
+            (Symbol::new(&env, "LiquidityAdded"),),
+            (market_id, lp_provider, liquidity_amount, lp_tokens_to_mint),
+        );
+
+        lp_tokens_to_mint
     }
 
     /// Remove liquidity from pool (redeem LP tokens)
