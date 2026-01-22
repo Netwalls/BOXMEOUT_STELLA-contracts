@@ -5,21 +5,21 @@ use soroban_sdk::{
     Address, BytesN, Env, Symbol,
 };
 
-use boxmeout::{OracleContract, OracleContractClient};
+use boxmeout::{OracleManager, OracleManagerClient};
 
 fn create_test_env() -> Env {
     Env::default()
 }
 
 fn register_oracle(env: &Env) -> Address {
-    env.register_contract(None, OracleContract)
+    env.register_contract(None, OracleManager)
 }
 
 #[test]
 fn test_oracle_initialize() {
     let env = create_test_env();
     let oracle_id = register_oracle(&env);
-    let client = OracleContractClient::new(&env, &oracle_id);
+    let client = OracleManagerClient::new(&env, &oracle_id);
 
     let admin = Address::generate(&env);
     let required_consensus = 2u32; // 2 of 3 oracles
@@ -36,7 +36,7 @@ fn test_register_oracle() {
     env.mock_all_auths();
 
     let oracle_id = register_oracle(&env);
-    let client = OracleContractClient::new(&env, &oracle_id);
+    let client = OracleManagerClient::new(&env, &oracle_id);
 
     let admin = Address::generate(&env);
     let required_consensus = 2u32;
@@ -58,7 +58,7 @@ fn test_register_multiple_oracles() {
     env.mock_all_auths();
 
     let oracle_id = register_oracle(&env);
-    let client = OracleContractClient::new(&env, &oracle_id);
+    let client = OracleManagerClient::new(&env, &oracle_id);
 
     let admin = Address::generate(&env);
     client.initialize(&admin, &2u32);
@@ -82,7 +82,7 @@ fn test_register_oracle_exceeds_limit() {
     env.mock_all_auths();
 
     let oracle_id = register_oracle(&env);
-    let client = OracleContractClient::new(&env, &oracle_id);
+    let client = OracleManagerClient::new(&env, &oracle_id);
 
     let admin = Address::generate(&env);
     client.initialize(&admin, &2u32);
@@ -102,7 +102,7 @@ fn test_register_duplicate_oracle() {
     env.mock_all_auths();
 
     let oracle_id = register_oracle(&env);
-    let client = OracleContractClient::new(&env, &oracle_id);
+    let client = OracleManagerClient::new(&env, &oracle_id);
 
     let admin = Address::generate(&env);
     client.initialize(&admin, &2u32);

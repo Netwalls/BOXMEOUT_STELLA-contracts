@@ -8,18 +8,21 @@
 // To build different contracts, comment/uncomment the appropriate module
 
 // FACTORY CONTRACT (currently active)
-mod factory;
+pub mod factory;
 pub use factory::*;
 
 // Uncomment below to build other contracts:
-// mod market;
-// pub use market::*;
+pub mod market;
+pub use market::*;
 
-// mod treasury;
-// pub use treasury::*;
+pub mod treasury;
+pub use treasury::*;
 
-// mod oracle;
-// pub use oracle::*;
+pub mod oracle;
+pub use oracle::*;
 
-// mod amm;
-// pub use amm::*;
+pub mod amm;
+pub use amm::*;
+
+pub mod helpers;
+pub use helpers::*;

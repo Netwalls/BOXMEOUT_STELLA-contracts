@@ -5,21 +5,21 @@ use soroban_sdk::{
     Address, BytesN, Env, Symbol,
 };
 
-use boxmeout::{MarketContract, MarketContractClient};
+use boxmeout::{PredictionMarket, PredictionMarketClient};
 
 fn create_test_env() -> Env {
     Env::default()
 }
 
 fn register_market(env: &Env) -> Address {
-    env.register_contract(None, MarketContract)
+    env.register_contract(None, PredictionMarket)
 }
 
 #[test]
 fn test_market_initialize() {
     let env = create_test_env();
     let market_id_contract = register_market(&env);
-    let client = MarketContractClient::new(&env, &market_id_contract);
+    let client = PredictionMarketClient::new(&env, &market_id_contract);
 
     // Create test data
     let market_id = BytesN::from_array(&env, &[1u8; 32]);
@@ -48,7 +48,7 @@ fn test_market_initialize() {
 fn test_commit_prediction() {
     let env = create_test_env();
     let market_id_contract = register_market(&env);
-    let client = MarketContractClient::new(&env, &market_id_contract);
+    let client = PredictionMarketClient::new(&env, &market_id_contract);
 
     // Initialize market
     let market_id = BytesN::from_array(&env, &[1u8; 32]);
@@ -83,7 +83,7 @@ fn test_commit_prediction() {
 fn test_commit_prediction_after_closing_fails() {
     let env = create_test_env();
     let market_id_contract = register_market(&env);
-    let client = MarketContractClient::new(&env, &market_id_contract);
+    let client = PredictionMarketClient::new(&env, &market_id_contract);
 
     // Initialize market with past closing time
     let market_id = BytesN::from_array(&env, &[1u8; 32]);

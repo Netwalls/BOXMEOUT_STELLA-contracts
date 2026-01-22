@@ -6,7 +6,7 @@ use soroban_sdk::{
 };
 
 // Import the Factory contract
-use boxmeout::{FactoryContract, FactoryContractClient};
+use boxmeout::{MarketFactory, MarketFactoryClient};
 
 // Helper function to create test environment
 fn create_test_env() -> Env {
@@ -15,14 +15,14 @@ fn create_test_env() -> Env {
 
 // Helper to register factory contract
 fn register_factory(env: &Env) -> Address {
-    env.register_contract(None, FactoryContract)
+    env.register_contract(None, MarketFactory)
 }
 
 #[test]
 fn test_factory_initialize() {
     let env = create_test_env();
     let factory_id = register_factory(&env);
-    let client = FactoryContractClient::new(&env, &factory_id);
+    let client = MarketFactoryClient::new(&env, &factory_id);
 
     // Create mock addresses
     let admin = Address::generate(&env);
@@ -42,7 +42,7 @@ fn test_factory_initialize() {
 fn test_factory_initialize_twice_fails() {
     let env = create_test_env();
     let factory_id = register_factory(&env);
-    let client = FactoryContractClient::new(&env, &factory_id);
+    let client = MarketFactoryClient::new(&env, &factory_id);
 
     let admin = Address::generate(&env);
     let usdc = Address::generate(&env);
@@ -59,7 +59,7 @@ fn test_factory_initialize_twice_fails() {
 fn test_create_market() {
     let env = create_test_env();
     let factory_id = register_factory(&env);
-    let client = FactoryContractClient::new(&env, &factory_id);
+    let client = MarketFactoryClient::new(&env, &factory_id);
 
     // Initialize factory
     let admin = Address::generate(&env);
@@ -98,7 +98,7 @@ fn test_create_market() {
 fn test_create_market_invalid_timestamps() {
     let env = create_test_env();
     let factory_id = register_factory(&env);
-    let client = FactoryContractClient::new(&env, &factory_id);
+    let client = MarketFactoryClient::new(&env, &factory_id);
 
     // Initialize factory
     let admin = Address::generate(&env);

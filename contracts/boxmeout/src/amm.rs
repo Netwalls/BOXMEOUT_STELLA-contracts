@@ -3,6 +3,9 @@
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Symbol, Vec};
 
+use crate::{amm, helpers::*};
+
+
 // Storage keys
 const ADMIN_KEY: &str = "admin";
 const FACTORY_KEY: &str = "factory";
@@ -114,7 +117,83 @@ impl AMM {
         amount: u128,
         min_shares: u128,
     ) -> u128 {
-        todo!("See buy shares TODO above")
+        buyer.require_auth();
+
+        if outcome > 1 {
+            panic!("Invalid outcome: must be 0 (NO) or 1 (YES)");
+        }
+        if amount == 0 {
+            panic!("Amount must be greater than zero");
+        }
+
+        if !pool_exists(&env, &market_id) {
+            panic!("Liquidity pool does not exist for this market");
+        }
+
+        let (yes_reserve, no_reserve) = get_pool_reserves(&env, &market_id);
+        let trading_fee_bps: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, TRADING_FEE_KEY))
+            .unwrap_or(20);
+        let fee = amount * (trading_fee_bps as u128) / 10_000;
+        let amount_after_fee = amount - fee;
+        let shares_out = calculate_shares_out(yes_reserve, no_reserve, outcome, amount_after_fee);
+
+        if shares_out < min_shares {
+            panic!("Slippage exceeded: would receive {} shares, minimum is {}", shares_out, min_shares);
+        }
+
+        let usdc_address: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, USDC_KEY))
+            .expect("USDC token not configured");
+        let usdc_client = soroban_sdk::token::Client::new(&env, &usdc_address);
+
+        usdc_client.transfer(&buyer, &env.current_contract_address(), &(amount as i128));
+
+        let (new_yes_reserve, new_no_reserve) = if outcome == 1 {
+            // Buying YES: YES reserve decreases by shares_out, NO reserve increases by input
+            (yes_reserve - shares_out, no_reserve + amount_after_fee)
+        } else {
+            // Buying NO: NO reserve decreases by shares_out, YES reserve increases by input
+            (yes_reserve + amount_after_fee, no_reserve - shares_out)
+        };
+
+        set_pool_reserves(&env, &market_id, new_yes_reserve, new_no_reserve);
+
+        let current_shares = get_user_shares(&env, &buyer, &market_id, outcome);
+
+        set_user_shares(&env, &buyer, &market_id, outcome, current_shares + shares_out);
+
+        let trade_index = increment_trade_count(&env, &market_id);
+        let trade_key = (Symbol::new(&env, "trade"), market_id.clone(), trade_index);
+        env.storage().persistent().set(
+            &trade_key,
+            &(
+                buyer.clone(),
+                outcome,
+                shares_out,
+                amount,
+                fee,
+                env.ledger().timestamp(),
+            ),
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "BuyShares"),),
+            (
+                buyer,
+                market_id,
+                outcome,
+                shares_out,
+                amount,
+                fee,
+            ),
+        );
+
+        shares_out
     }
 
     /// Sell outcome shares back to AMM
