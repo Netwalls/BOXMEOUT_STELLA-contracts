@@ -1,7 +1,9 @@
 // contract/src/factory.rs - Market Factory Contract Implementation
 // Handles market creation and lifecycle management
 
-use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, IntoVal, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, token, Address, Bytes, BytesN, Env, IntoVal, Symbol, Vec,
+};
 
 // Storage keys
 const ADMIN_KEY: &str = "admin";
@@ -18,7 +20,11 @@ impl MarketFactory {
     /// Initialize factory with admin, USDC token, and treasury address
     pub fn initialize(env: Env, admin: Address, usdc: Address, treasury: Address) {
         // Check if already initialized
-        if env.storage().persistent().has(&Symbol::new(&env, ADMIN_KEY)) {
+        if env
+            .storage()
+            .persistent()
+            .has(&Symbol::new(&env, ADMIN_KEY))
+        {
             panic!("already initialized");
         }
 
@@ -92,14 +98,14 @@ impl MarketFactory {
         // Generate unique market_id using SHA256
         // Combine creator address, market_count, and timestamp for uniqueness
         let mut hash_input = Bytes::new(&env);
-        
+
         // Convert address to bytes by serializing to ScVal and getting raw bytes
         hash_input.extend_from_array(&market_count.to_be_bytes());
         hash_input.extend_from_array(&current_time.to_be_bytes());
-        
+
         // Hash to get unique ID
         let hash = env.crypto().sha256(&hash_input);
-        
+
         // Convert Hash<32> to BytesN<32> for use as market_id
         let market_id = BytesN::from_array(&env, &hash.to_array());
 
@@ -109,7 +115,14 @@ impl MarketFactory {
 
         // Store market metadata
         let metadata_key = (Symbol::new(&env, "market_meta"), market_id.clone());
-        let metadata = (creator.clone(), title.clone(), description, category, closing_time, resolution_time);
+        let metadata = (
+            creator.clone(),
+            title.clone(),
+            description,
+            category,
+            closing_time,
+            resolution_time,
+        );
         env.storage().persistent().set(&metadata_key, &metadata);
 
         // Increment market counter

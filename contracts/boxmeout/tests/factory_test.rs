@@ -78,7 +78,7 @@ fn test_create_market() {
 
     // Create market
     let creator = Address::generate(&env);
-    
+
     // Mint USDC tokens to creator for fee payment
     let token_client = token::StellarAssetClient::new(&env, &usdc);
     token_client.mint(&creator, &100_000_000); // 10 USDC
@@ -184,7 +184,7 @@ fn test_create_market_uniqueness() {
 
     // Create first market
     let creator = Address::generate(&env);
-    
+
     // Mint USDC tokens to creator for fee payment (enough for 2 markets)
     let token_client = token::StellarAssetClient::new(&env, &usdc);
     token_client.mint(&creator, &100_000_000); // 10 USDC

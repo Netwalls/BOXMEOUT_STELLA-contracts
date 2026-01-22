@@ -82,7 +82,7 @@ impl PredictionMarket {
             .persistent()
             .set(&Symbol::new(&env, CREATOR_KEY), &creator);
 
-        // Store factory address 
+        // Store factory address
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, FACTORY_KEY), &factory);
@@ -132,26 +132,6 @@ impl PredictionMarket {
         );
     }
 
-    /// Phase 1: User commits to a prediction (commit-reveal scheme for privacy)
-    ///
-    /// Commit Prediction - Implements commit phase of commit-reveal scheme
-    /// Users lock funds with a commit hash before closing time for privacy
-    ///
-    /// # Arguments
-    /// * `user` - User address making the commitment
-    /// * `commit_hash` - Hash of (outcome + amount + salt) for privacy
-    /// * `amount` - Amount of USDC to commit (must be positive)
-    ///
-    /// # Returns
-    /// * `Result<(), MarketError>` - Success or error code
-    ///
-    /// # Errors
-    /// * `NotInitialized` - Market has not been initialized
-    /// * `InvalidMarketState` - Market is not open
-    /// * `MarketClosed` - Current time >= closing_time
-    /// * `InvalidAmount` - Amount is not positive
-    /// * `DuplicateCommit` - User has already committed
-    /// * `TransferFailed` - USDC transfer failed
     pub fn commit_prediction(
         env: Env,
         user: Address,

@@ -9,18 +9,18 @@
 // To build different contracts for deployment, comment/uncomment the appropriate module below
 
 // All modules are always available for library and test builds
+mod amm;
 mod factory;
 mod market;
-mod treasury;
 mod oracle;
-mod amm;
+mod treasury;
 
 // Export all contracts - needed for integration tests
+pub use amm::*;
 pub use factory::*;
 pub use market::*;
-pub use treasury::*;
 pub use oracle::*;
-pub use amm::*;
+pub use treasury::*;
 
 // Type aliases for test compatibility
 pub use factory::MarketFactory as FactoryContract;
@@ -35,5 +35,5 @@ pub use treasury::TreasuryClient as TreasuryContractClient;
 pub use oracle::OracleManager as OracleContract;
 pub use oracle::OracleManagerClient as OracleContractClient;
 
-pub use amm::AMM as AMMContract;
 pub use amm::AMMClient as AMMContractClient;
+pub use amm::AMM as AMMContract;
