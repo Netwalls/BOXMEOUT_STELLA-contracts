@@ -396,14 +396,11 @@ impl PredictionMarket {
         let oracle_client = crate::oracle::OracleManagerClient::new(&env, &oracle_address);
 
         // Check if oracle consensus has been reached
-        let consensus_reached = oracle_client.check_consensus(&market_id);
+        let (consensus_reached, final_outcome) = oracle_client.check_consensus(&market_id);
 
         if !consensus_reached {
             panic!("Oracle consensus not reached");
         }
-
-        // Get the consensus result from oracle (0 = NO, 1 = YES)
-        let final_outcome = oracle_client.get_consensus_result(&market_id);
 
         // Validate outcome is binary (0 or 1)
         if final_outcome > 1 {
@@ -604,11 +601,16 @@ mod tests {
     impl MockOracle {
         pub fn initialize(_env: Env) {}
 
-        pub fn check_consensus(env: Env, _market_id: BytesN<32>) -> bool {
-            env.storage()
+        pub fn check_consensus(env: Env, _market_id: BytesN<32>) -> (bool, u32) {
+            let reached = env.storage()
                 .instance()
                 .get(&Symbol::new(&env, "consensus"))
-                .unwrap_or(true)
+                .unwrap_or(true);
+            let outcome = env.storage()
+                .instance()
+                .get(&Symbol::new(&env, "outcome"))
+                .unwrap_or(1u32);
+            (reached, outcome)
         }
 
         pub fn get_consensus_result(env: Env, _market_id: BytesN<32>) -> u32 {

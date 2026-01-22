@@ -218,14 +218,6 @@ impl OracleManager {
         } else {
             (false, 0)
         }
-    pub fn check_consensus(env: Env, market_id: BytesN<32>) -> bool {
-        // For now, return true if we have any recorded consensus result
-        // or a mock implementation for testing
-        let consensus_key = (Symbol::new(&env, "consensus_reached"), market_id.clone());
-        env.storage()
-            .persistent()
-            .get(&consensus_key)
-            .unwrap_or(false)
     }
 
     /// Get the consensus result for a market
