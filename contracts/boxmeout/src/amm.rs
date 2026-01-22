@@ -448,24 +448,127 @@ impl AMM {
 
     /// Remove liquidity from pool (redeem LP tokens)
     ///
-    /// TODO: Remove Liquidity
-    /// - Validate lp_provider owns LP tokens
-    /// - Validate lp_tokens_to_remove > 0 and <= balance
-    /// - Query pool state and total LP tokens
-    /// - Calculate user's share: (lp_tokens / total_lp) * pool_liquidity
-    /// - Validate pool has enough reserves (maintain minimum liquidity)
-    /// - Calculate withdrawal in YES and NO shares
-    /// - Burn LP tokens from provider
-    /// - Sell back YES/NO shares using current prices
-    /// - Execute token transfer: Contract -> User (usdc_equivalent - fee)
-    /// - Emit LiquidityRemoved(lp_address, market_id, usdc_proceeds, lp_tokens_burned)
+    /// Validates LP token ownership, calculates proportional YES/NO withdrawal,
+    /// burns LP tokens, updates reserves and k, transfers tokens to user.
     pub fn remove_liquidity(
         env: Env,
         lp_provider: Address,
         market_id: BytesN<32>,
         lp_tokens: u128,
-    ) -> u128 {
-        todo!("See remove liquidity TODO above")
+    ) -> (u128, u128) {
+        // Require LP provider authentication
+        lp_provider.require_auth();
+
+        // Validate lp_tokens > 0
+        if lp_tokens == 0 {
+            panic!("lp tokens must be positive");
+        }
+
+        // Check if pool exists for this market
+        let pool_exists_key = (Symbol::new(&env, POOL_EXISTS_PREFIX), &market_id);
+        if !env.storage().persistent().has(&pool_exists_key) {
+            panic!("pool does not exist");
+        }
+
+        // Create storage keys for this pool
+        let yes_reserve_key = (Symbol::new(&env, POOL_YES_RESERVE_PREFIX), &market_id);
+        let no_reserve_key = (Symbol::new(&env, POOL_NO_RESERVE_PREFIX), &market_id);
+        let k_key = (Symbol::new(&env, POOL_K_PREFIX), &market_id);
+        let lp_supply_key = (Symbol::new(&env, POOL_LP_SUPPLY_PREFIX), &market_id);
+        let lp_balance_key = (Symbol::new(&env, POOL_LP_TOKENS_PREFIX), &market_id, &lp_provider);
+
+        // Get LP provider's current balance
+        let lp_balance: u128 = env
+            .storage()
+            .persistent()
+            .get(&lp_balance_key)
+            .unwrap_or(0);
+
+        // Validate user has enough LP tokens
+        if lp_balance < lp_tokens {
+            panic!("insufficient lp tokens");
+        }
+
+        // Get current reserves
+        let yes_reserve: u128 = env
+            .storage()
+            .persistent()
+            .get(&yes_reserve_key)
+            .expect("yes reserve not found");
+        let no_reserve: u128 = env
+            .storage()
+            .persistent()
+            .get(&no_reserve_key)
+            .expect("no reserve not found");
+
+        // Get current LP token supply
+        let current_lp_supply: u128 = env
+            .storage()
+            .persistent()
+            .get(&lp_supply_key)
+            .expect("lp supply not found");
+
+        // Calculate proportional YES and NO amounts to withdraw
+        // yes_amount = (lp_tokens / current_lp_supply) * yes_reserve
+        let yes_amount = (lp_tokens * yes_reserve) / current_lp_supply;
+        let no_amount = (lp_tokens * no_reserve) / current_lp_supply;
+
+        if yes_amount == 0 || no_amount == 0 {
+            panic!("withdrawal amount too small");
+        }
+
+        // Update reserves
+        let new_yes_reserve = yes_reserve - yes_amount;
+        let new_no_reserve = no_reserve - no_amount;
+
+        // Validate minimum liquidity remains (prevent draining pool completely)
+        if new_yes_reserve == 0 || new_no_reserve == 0 {
+            panic!("cannot drain pool completely");
+        }
+
+        // Update k
+        let new_k = new_yes_reserve * new_no_reserve;
+
+        // Store updated reserves and k
+        env.storage().persistent().set(&yes_reserve_key, &new_yes_reserve);
+        env.storage().persistent().set(&no_reserve_key, &new_no_reserve);
+        env.storage().persistent().set(&k_key, &new_k);
+
+        // Burn LP tokens from provider
+        let new_lp_balance = lp_balance - lp_tokens;
+        if new_lp_balance == 0 {
+            env.storage().persistent().remove(&lp_balance_key);
+        } else {
+            env.storage().persistent().set(&lp_balance_key, &new_lp_balance);
+        }
+
+        // Update LP token supply
+        let new_lp_supply = current_lp_supply - lp_tokens;
+        env.storage().persistent().set(&lp_supply_key, &new_lp_supply);
+
+        // Transfer USDC back to user (YES and NO reserves are in USDC)
+        // The user receives their proportional share of the pool's liquidity
+        let usdc_token: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, USDC_KEY))
+            .expect("usdc token not set");
+
+        let token_client = token::Client::new(&env, &usdc_token);
+        let total_withdrawal = yes_amount + no_amount;
+        token_client.transfer(
+            &env.current_contract_address(),
+            &lp_provider,
+            &(total_withdrawal as i128),
+        );
+
+        // Emit LiquidityRemoved event
+        env.events().publish(
+            (Symbol::new(&env, "LiquidityRemoved"),),
+            (market_id, lp_provider, lp_tokens, yes_amount, no_amount),
+        );
+
+        (yes_amount, no_amount)
     }
 
     /// Get LP provider's share and accumulated fees
