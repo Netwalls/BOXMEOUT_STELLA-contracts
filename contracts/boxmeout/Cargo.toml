@@ -4,9 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "boxmeout"
 crate-type = ["cdylib", "rlib"]
-path = "src/lib.rs"
 
 [dependencies]
 soroban-sdk = { workspace = true }
