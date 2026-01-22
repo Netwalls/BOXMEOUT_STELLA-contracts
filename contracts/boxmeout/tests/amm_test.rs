@@ -175,14 +175,6 @@ fn test_buy_shares_no() {
 }
 
 #[test]
-fn test_buy_shares_price_impact() {
-    // TODO: Implement when buy_shares is ready
-    // Test CPMM formula: x * y = k
-    // Large buy should have higher price impact
-    // Small buy should have lower price impact
-}
-
-#[test]
 #[should_panic(expected = "slippage exceeded")]
 fn test_buy_shares_slippage_protection() {
     let env = create_test_env();
@@ -411,28 +403,6 @@ fn test_get_odds_read_only() {
     assert_eq!(yes_odds_1 + no_odds_1, 10000);
 }
 
-#[test]
-fn test_add_liquidity() {
-    // TODO: Implement when add_liquidity is ready
-    // Test adding liquidity to existing pool
-    // Test LP token minting
-}
-
-#[test]
-fn test_remove_liquidity() {
-    // TODO: Implement when remove_liquidity is ready
-    // Test removing liquidity
-    // Test LP token burning
-    // Test proportional payout
-}
-
-#[test]
-fn test_cpmm_invariant() {
-    // TODO: Advanced test
-    // Test that K = x * y remains constant (accounting for fees)
-    // After multiple trades, verify invariant holds
-}
-
 // Integration test for odds calculation with manual reserve manipulation
 #[test]
 fn test_odds_calculation_scenarios() {
@@ -498,6 +468,7 @@ fn test_amm_pricing_logic() {
     assert_eq!(no_odds, 8000);  // 80% - NO is cheap
     assert_eq!(yes_odds + no_odds, 10000);
 }
+
 // Comprehensive integration test for full trading cycle
 #[test]
 fn test_full_trading_cycle() {

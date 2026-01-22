@@ -1,7 +1,16 @@
+<<<<<<< HEAD
 // contracts/market.rs - Individual Prediction Market Contract
 // Handles predictions, bet commitment/reveal, market resolution
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Map, Symbol, Vec};
+=======
+// Individual Prediction Market Contract - This handles predictions, bet commitment/reveal, market resolution
+
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Map, Symbol,
+    Vec,
+};
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
 
 // Storage keys
 const MARKET_ID_KEY: &str = "market_id";
@@ -14,12 +23,49 @@ const MARKET_STATE_KEY: &str = "market_state";
 const YES_POOL_KEY: &str = "yes_pool";
 const NO_POOL_KEY: &str = "no_pool";
 const TOTAL_VOLUME_KEY: &str = "total_volume";
+<<<<<<< HEAD
+=======
+const PENDING_COUNT_KEY: &str = "pending_count";
+const COMMIT_PREFIX: &str = "commit";
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
 
 /// Market states
 const STATE_OPEN: u32 = 0;
 const STATE_CLOSED: u32 = 1;
 const STATE_RESOLVED: u32 = 2;
 
+<<<<<<< HEAD
+=======
+/// Error codes following Soroban best practices
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum MarketError {
+    /// Market is not in the required state
+    InvalidMarketState = 1,
+    /// Action attempted after closing time
+    MarketClosed = 2,
+    /// Invalid amount (must be positive)
+    InvalidAmount = 3,
+    /// User has already committed to this market
+    DuplicateCommit = 4,
+    /// Token transfer failed
+    TransferFailed = 5,
+    /// Market has not been initialized
+    NotInitialized = 6,
+}
+
+/// Commitment record for commit-reveal scheme
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Commitment {
+    pub user: Address,
+    pub commit_hash: BytesN<32>,
+    pub amount: i128,
+    pub timestamp: u64,
+}
+
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
 /// PREDICTION MARKET - Manages individual market logic
 #[contract]
 pub struct PredictionMarket;
@@ -49,7 +95,11 @@ impl PredictionMarket {
             .persistent()
             .set(&Symbol::new(&env, CREATOR_KEY), &creator);
 
+<<<<<<< HEAD
         // Store factory address (parent contract)
+=======
+        // Store factory address
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, FACTORY_KEY), &factory);
@@ -68,7 +118,11 @@ impl PredictionMarket {
             .persistent()
             .set(&Symbol::new(&env, RESOLUTION_TIME_KEY), &resolution_time);
 
+<<<<<<< HEAD
         // Initialize market state as OPEN
+=======
+        // Initialize market state as open
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_OPEN);
@@ -87,6 +141,14 @@ impl PredictionMarket {
             .persistent()
             .set(&Symbol::new(&env, TOTAL_VOLUME_KEY), &0i128);
 
+<<<<<<< HEAD
+=======
+        // Initialize pending count
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, PENDING_COUNT_KEY), &0u32);
+
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
         // Emit initialization event
         env.events().publish(
             (Symbol::new(&env, "market_initialized"),),
@@ -94,6 +156,7 @@ impl PredictionMarket {
         );
     }
 
+<<<<<<< HEAD
     /// Phase 1: User commits to a prediction (commit-reveal scheme for privacy)
     ///
     /// TODO: Commit Prediction
@@ -118,6 +181,127 @@ impl PredictionMarket {
         amount: i128,
     ) {
         todo!("See commit prediction TODO above")
+=======
+    pub fn commit_prediction(
+        env: Env,
+        user: Address,
+        commit_hash: BytesN<32>,
+        amount: i128,
+    ) -> Result<(), MarketError> {
+        //  Require user authentication
+        user.require_auth();
+
+        //  Validate market is initialized
+        let market_state: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, MARKET_STATE_KEY))
+            .ok_or(MarketError::NotInitialized)?;
+
+        //  Validate market is in open state
+        if market_state != STATE_OPEN {
+            return Err(MarketError::InvalidMarketState);
+        }
+
+        //  Validate current timestamp < closing_time
+        let closing_time: u64 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, CLOSING_TIME_KEY))
+            .ok_or(MarketError::NotInitialized)?;
+
+        let current_time = env.ledger().timestamp();
+        if current_time >= closing_time {
+            return Err(MarketError::MarketClosed);
+        }
+
+        //  Validate amount > 0
+        if amount <= 0 {
+            return Err(MarketError::InvalidAmount);
+        }
+
+        //  Check for duplicate commit per user
+        let commit_key = Self::get_commit_key(&env, &user);
+        if env.storage().persistent().has(&commit_key) {
+            return Err(MarketError::DuplicateCommit);
+        }
+
+        //  Get USDC token contract and market_id
+        let usdc_token: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, USDC_KEY))
+            .ok_or(MarketError::NotInitialized)?;
+
+        let market_id: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, MARKET_ID_KEY))
+            .ok_or(MarketError::NotInitialized)?;
+
+        //  Transfer USDC from user to market escrow (this contract)
+        let token_client = token::TokenClient::new(&env, &usdc_token);
+        let contract_address = env.current_contract_address();
+
+        // Transfer tokens - will panic if insufficient balance or approval
+        token_client.transfer(&user, &contract_address, &amount);
+
+        //  Create and store commitment record
+        let commitment = Commitment {
+            user: user.clone(),
+            commit_hash: commit_hash.clone(),
+            amount,
+            timestamp: current_time,
+        };
+
+        env.storage().persistent().set(&commit_key, &commitment);
+
+        //  Update pending count
+        let pending_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, PENDING_COUNT_KEY))
+            .unwrap_or(0);
+
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, PENDING_COUNT_KEY), &(pending_count + 1));
+
+        // 11. Emit CommitmentMade event
+        env.events().publish(
+            (Symbol::new(&env, "CommitmentMade"),),
+            (user, market_id, amount),
+        );
+
+        Ok(())
+    }
+
+    /// Helper: Generate storage key for user commitment
+    fn get_commit_key(env: &Env, user: &Address) -> (Symbol, Address) {
+        // Use tuple key: (commit_prefix, user_address)
+        (Symbol::new(env, COMMIT_PREFIX), user.clone())
+    }
+
+    /// Helper: Get user commitment (for testing and reveal phase)
+    pub fn get_commitment(env: Env, user: Address) -> Option<Commitment> {
+        let commit_key = Self::get_commit_key(&env, &user);
+        env.storage().persistent().get(&commit_key)
+    }
+
+    /// Helper: Get pending commit count
+    pub fn get_pending_count(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&Symbol::new(&env, PENDING_COUNT_KEY))
+            .unwrap_or(0)
+    }
+
+    /// Helper: Get market state
+    pub fn get_market_state_value(env: Env) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&Symbol::new(&env, MARKET_STATE_KEY))
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
     }
 
     /// Phase 2: User reveals their committed prediction
@@ -178,11 +362,15 @@ impl PredictionMarket {
     /// - Mark market as settled
     /// - Emit MarketResolved(market_id, winning_outcome, total_winners, timestamp)
     /// - Prepare treasury transfers for fee collection
+<<<<<<< HEAD
     pub fn resolve_market(
         env: Env,
         market_id: BytesN<32>,
         winning_outcome: u32,
     ) {
+=======
+    pub fn resolve_market(env: Env, market_id: BytesN<32>, winning_outcome: u32) {
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
         todo!("See resolve market TODO above")
     }
 
@@ -198,12 +386,16 @@ impl PredictionMarket {
     /// - Increment dispute counter
     /// - Emit MarketDisputed(user, reason, market_id, timestamp)
     /// - Notify admin of dispute
+<<<<<<< HEAD
     pub fn dispute_market(
         env: Env,
         user: Address,
         market_id: BytesN<32>,
         dispute_reason: Symbol,
     ) {
+=======
+    pub fn dispute_market(env: Env, user: Address, market_id: BytesN<32>, dispute_reason: Symbol) {
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
         todo!("See dispute market TODO above")
     }
 
@@ -239,11 +431,15 @@ impl PredictionMarket {
     /// - Transfer refund from treasury to user
     /// - Mark as refunded
     /// - Emit LosingBetRefunded(user, market_id, refund_amount, timestamp)
+<<<<<<< HEAD
     pub fn refund_losing_bet(
         env: Env,
         user: Address,
         market_id: BytesN<32>,
     ) -> i128 {
+=======
+    pub fn refund_losing_bet(env: Env, user: Address, market_id: BytesN<32>) -> i128 {
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
         todo!("See refund losing bet TODO above")
     }
 
@@ -270,11 +466,15 @@ impl PredictionMarket {
     /// - Include: commit timestamp, reveal timestamp, claim timestamp
     /// - Include potential payout if market is unresolved
     /// - Handle: user has no prediction (return error)
+<<<<<<< HEAD
     pub fn get_user_prediction(
         env: Env,
         user: Address,
         market_id: BytesN<32>,
     ) -> Symbol {
+=======
+    pub fn get_user_prediction(env: Env, user: Address, market_id: BytesN<32>) -> Symbol {
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
         todo!("See get user prediction TODO above")
     }
 

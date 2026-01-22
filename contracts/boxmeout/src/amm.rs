@@ -1,7 +1,7 @@
 // contracts/amm.rs - Automated Market Maker for Outcome Shares
 // Enables trading YES/NO outcome shares with dynamic odds pricing (Polymarket model)
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Symbol, Vec};
 
 // Storage keys
 const ADMIN_KEY: &str = "admin";
@@ -404,167 +404,12 @@ impl AMM {
         (yes_reserve, no_reserve, total_liquidity, yes_odds, no_odds)
     }
 
-    /// Add liquidity to existing pool (become LP)
-    ///
-    /// TODO: Add Liquidity
-    /// - Validate market_id and pool exists
-    /// - Validate liquidity_amount > 0
-    /// - Query current reserves ratio
-    /// - Calculate fair LP share: (liquidity_input / total_liquidity) * lp_tokens_outstanding
-    /// - Validate not exceeding max_liquidity_cap
-    /// - Transfer USDC from LP to contract
-    /// - Mint LP tokens to LP provider (equal share of fees)
-    /// - Allocate shares proportionally to YES and NO reserves
-    /// - Update total_liquidity
-    /// - Emit LiquidityAdded(lp_address, market_id, amount, lp_tokens_issued)
-    pub fn add_liquidity(
-        env: Env,
-        lp_provider: Address,
-        market_id: BytesN<32>,
-        liquidity_amount: u128,
-    ) -> u128 {
-        todo!("See add liquidity TODO above")
-    }
-
-    /// Remove liquidity from pool (redeem LP tokens)
-    ///
-    /// TODO: Remove Liquidity
-    /// - Validate lp_provider owns LP tokens
-    /// - Validate lp_tokens_to_remove > 0 and <= balance
-    /// - Query pool state and total LP tokens
-    /// - Calculate user's share: (lp_tokens / total_lp) * pool_liquidity
-    /// - Validate pool has enough reserves (maintain minimum liquidity)
-    /// - Calculate withdrawal in YES and NO shares
-    /// - Burn LP tokens from provider
-    /// - Sell back YES/NO shares using current prices
-    /// - Execute token transfer: Contract -> User (usdc_equivalent - fee)
-    /// - Emit LiquidityRemoved(lp_address, market_id, usdc_proceeds, lp_tokens_burned)
-    pub fn remove_liquidity(
-        env: Env,
-        lp_provider: Address,
-        market_id: BytesN<32>,
-        lp_tokens: u128,
-    ) -> u128 {
-        todo!("See remove liquidity TODO above")
-    }
-
-    /// Get LP provider's share and accumulated fees
-    ///
-    /// TODO: Get LP Position
-    /// - Query LP tokens owned by provider
-    /// - Calculate proportional share: (lp_tokens / total_lp) * pool_liquidity
-    /// - Calculate fees earned: (provider_share / pool_share) * accumulated_fees
-    /// - Include: entry_price, current_value, unrealized_gains
-    /// - Include: pending_fee_rewards
-    pub fn get_lp_position(env: Env, lp_provider: Address, market_id: BytesN<32>) -> Symbol {
-        todo!("See get LP position TODO above")
-    }
-
-    /// Claim accumulated trading fees
-    ///
-    /// TODO: Claim LP Fees
-    /// - Validate lp_provider has LP tokens
-    /// - Calculate accumulated fees since last claim
-    /// - Fees = (provider_lp_share / total_lp) * total_fee_pool
-    /// - Execute token transfer: Contract -> LP (fees)
-    /// - Reset fee_last_claimed timestamp
-    /// - Emit FeesClaimed(lp_provider, market_id, fee_amount)
-    pub fn claim_lp_fees(env: Env, lp_provider: Address, market_id: BytesN<32>) -> u128 {
-        todo!("See claim LP fees TODO above")
-    }
-
-    /// Rebalance pool if reserves drift too far (maintain stability)
-    ///
-    /// TODO: Rebalance Pool
-    /// - Calculate current reserve ratio: yes_qty / no_qty
-    /// - Define acceptable range (e.g., 0.3 to 3.0 ratio)
-    /// - If drift detected: calculate correction needed
-    /// - Mint or burn shares to restore balance
-    /// - Require admin authentication for rebalance
-    /// - Update reserves and recalculate odds
-    /// - Emit PoolRebalanced(market_id, old_ratio, new_ratio)
-    pub fn rebalance_pool(env: Env, market_id: BytesN<32>) {
-        todo!("See rebalance pool TODO above")
-    }
-
-    /// Get user's share holdings
-    ///
-    /// TODO: Get User Shares
-    /// - Query user_shares: (user, market_id, outcome) -> quantity
-    /// - Return: yes_shares, no_shares, total_shares_value_usd
-    /// - Include: current market price for each
-    /// - Include: unrealized gains/losses if sold now
-    pub fn get_user_shares(env: Env, user: Address, market_id: BytesN<32>) -> Symbol {
-        todo!("See get user shares TODO above")
-    }
-
-    /// Get trading history for market (price discovery)
-    ///
-    /// TODO: Get Trade History
-    /// - Query trades for market_id (sorted by timestamp DESC)
-    /// - Return paginated: (offset, limit)
-    /// - Include: trader, outcome, shares, price_per_share, volume, timestamp
-    /// - Calculate VWAP (volume weighted average price)
-    pub fn get_trade_history(
-        env: Env,
-        market_id: BytesN<32>,
-        offset: u32,
-        limit: u32,
-    ) -> Vec<Symbol> {
-        todo!("See get trade history TODO above")
-    }
-
-    /// Calculate spot price for buying X shares
-    ///
-    /// TODO: Calculate Spot Price
-    /// - Use CPMM formula with current reserves
-    /// - For outcome in [0,1], return price per share
-    /// - Include: average_price, slippage_impact
-    /// - Show fee component in total
-    pub fn calculate_spot_price(
-        env: Env,
-        market_id: BytesN<32>,
-        outcome: u32,
-        buy_amount: u128,
-    ) -> u128 {
-        todo!("See calculate spot price TODO above")
-    }
-
-    /// Set slippage tolerance per market
-    ///
-    /// TODO: Set Slippage Tolerance
-    /// - Validate new_slippage in range [0.1%, 5%]
-    /// - Update slippage_protection for market
-    /// - Apply to all future trades for this market
-    /// - Older trades keep original slippage setting
-    /// - Emit SlippageToleranceUpdated(market_id, old_slippage, new_slippage)
-    pub fn set_slippage_tolerance(env: Env, market_id: BytesN<32>, new_slippage_bps: u32) {
-        todo!("See set slippage tolerance TODO above")
-    }
-
-    /// Admin: Drain stale liquidity (if market becomes inactive)
-    ///
-    /// TODO: Emergency Drain
-    /// - Require admin authentication
-    /// - Validate market is RESOLVED or CANCELLED
-    /// - Query remaining pool liquidity
-    /// - Convert remaining shares to USDC
-    /// - Transfer to treasury contract
-    /// - Emit PoolDrained(market_id, usdc_amount)
-    pub fn drain_pool(env: Env, market_id: BytesN<32>) {
-        todo!("See drain pool TODO above")
-    }
-
-    /// Get AMM performance metrics
-    ///
-    /// TODO: Get AMM Analytics
-    /// - Total volume traded (all-time)
-    /// - Total fees collected
-    /// - Average spread (mid-point to prices)
-    /// - Active pools count
-    /// - Top markets by volume
-    /// - Liquidity distribution (concentration)
-    pub fn get_amm_analytics(env: Env) -> Symbol {
-        todo!("See get AMM analytics TODO above")
-    }
+    // TODO: Implement remaining AMM functions
+    // - add_liquidity() / remove_liquidity()
+    // - get_lp_position() / claim_lp_fees()
+    // - calculate_spot_price()
+    // - get_trade_history()
+    // - rebalance_pool()
+    // - drain_pool()
+    // - get_amm_analytics()
 }

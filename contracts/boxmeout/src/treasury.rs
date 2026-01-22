@@ -91,12 +91,16 @@ impl Treasury {
     /// - Increment appropriate fee counter
     /// - Record deposit with source contract and timestamp
     /// - Emit FeeDeposited(source, fee_category, amount, timestamp)
+<<<<<<< HEAD
     pub fn deposit_fees(
         env: Env,
         source: Address,
         fee_category: Symbol,
         amount: i128,
     ) {
+=======
+    pub fn deposit_fees(env: Env, source: Address, fee_category: Symbol, amount: i128) {
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
         todo!("See deposit fees TODO above")
     }
 
@@ -168,12 +172,16 @@ impl Treasury {
     /// - Record withdrawal with admin who authorized it
     /// - Emit EmergencyWithdrawal(admin, recipient, amount, timestamp)
     /// - Require 2+ admins to approve for security
+<<<<<<< HEAD
     pub fn emergency_withdraw(
         env: Env,
         admin: Address,
         recipient: Address,
         amount: i128,
     ) {
+=======
+    pub fn emergency_withdraw(env: Env, admin: Address, recipient: Address, amount: i128) {
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
         todo!("See emergency withdraw TODO above")
     }
 
@@ -207,6 +215,7 @@ impl Treasury {
         todo!("See set reward multiplier TODO above")
     }
 }
+<<<<<<< HEAD
     
 
     /// Get treasury summary report
@@ -221,3 +230,17 @@ impl Treasury {
         todo!("See get treasury report TODO above")
     }
 
+=======
+
+/// Get treasury summary report
+///
+/// TODO: Get Treasury Report
+/// - Compile all treasury metrics
+/// - Return: total_collected, total_distributed, current_balance
+/// - Include: by_pool (platform, leaderboard, creator)
+/// - Include: pending_distributions, pending_claims
+/// - Include: for_date (monthly/yearly breakdown)
+pub fn get_treasury_report(env: Env) -> Symbol {
+    todo!("See get treasury report TODO above")
+}
+>>>>>>> 0d438863f72917744879ae34526e16a766719043

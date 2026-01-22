@@ -24,6 +24,10 @@ fn test_oracle_initialize() {
     let admin = Address::generate(&env);
     let required_consensus = 2u32; // 2 of 3 oracles
 
+<<<<<<< HEAD
+=======
+    env.mock_all_auths();
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
     client.initialize(&admin, &required_consensus);
 
     // TODO: Add getters to verify
@@ -96,7 +100,11 @@ fn test_register_oracle_exceeds_limit() {
 }
 
 #[test]
+<<<<<<< HEAD
 #[should_panic(expected = "oracle already registered")]
+=======
+#[should_panic]
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
 fn test_register_duplicate_oracle() {
     let env = create_test_env();
     env.mock_all_auths();
@@ -148,6 +156,10 @@ fn test_resolve_market_with_consensus() {
 }
 
 #[test]
+<<<<<<< HEAD
+=======
+#[ignore]
+>>>>>>> 0d438863f72917744879ae34526e16a766719043
 #[should_panic(expected = "consensus not reached")]
 fn test_resolve_market_without_consensus() {
     // TODO: Implement when resolve_market is ready
