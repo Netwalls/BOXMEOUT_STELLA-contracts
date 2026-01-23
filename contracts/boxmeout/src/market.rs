@@ -1,41 +1,40 @@
-<<<<<<< HEAD
 // contracts/market.rs - Individual Prediction Market Contract
 // Handles predictions, bet commitment/reveal, market resolution
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Map, Symbol, Vec};
-=======
 // Individual Prediction Market Contract - This handles predictions, bet commitment/reveal, market resolution
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Map, Symbol,
     Vec,
 };
->>>>>>> 0d438863f72917744879ae34526e16a766719043
 
 // Storage keys
 const MARKET_ID_KEY: &str = "market_id";
 const CREATOR_KEY: &str = "creator";
 const FACTORY_KEY: &str = "factory";
 const USDC_KEY: &str = "usdc";
+const ORACLE_KEY: &str = "oracle";
 const CLOSING_TIME_KEY: &str = "closing_time";
 const RESOLUTION_TIME_KEY: &str = "resolution_time";
 const MARKET_STATE_KEY: &str = "market_state";
 const YES_POOL_KEY: &str = "yes_pool";
 const NO_POOL_KEY: &str = "no_pool";
 const TOTAL_VOLUME_KEY: &str = "total_volume";
-<<<<<<< HEAD
-=======
+
 const PENDING_COUNT_KEY: &str = "pending_count";
 const COMMIT_PREFIX: &str = "commit";
->>>>>>> 0d438863f72917744879ae34526e16a766719043
+
+const WINNING_OUTCOME_KEY: &str = "winning_outcome";
+const WINNER_SHARES_KEY: &str = "winner_shares";
+const LOSER_SHARES_KEY: &str = "loser_shares";
 
 /// Market states
 const STATE_OPEN: u32 = 0;
 const STATE_CLOSED: u32 = 1;
 const STATE_RESOLVED: u32 = 2;
 
-<<<<<<< HEAD
-=======
+
 /// Error codes following Soroban best practices
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -65,7 +64,6 @@ pub struct Commitment {
     pub timestamp: u64,
 }
 
->>>>>>> 0d438863f72917744879ae34526e16a766719043
 /// PREDICTION MARKET - Manages individual market logic
 #[contract]
 pub struct PredictionMarket;
@@ -79,6 +77,7 @@ impl PredictionMarket {
         creator: Address,
         factory: Address,
         usdc_token: Address,
+        oracle: Address,
         closing_time: u64,
         resolution_time: u64,
     ) {
@@ -95,11 +94,7 @@ impl PredictionMarket {
             .persistent()
             .set(&Symbol::new(&env, CREATOR_KEY), &creator);
 
-<<<<<<< HEAD
-        // Store factory address (parent contract)
-=======
-        // Store factory address
->>>>>>> 0d438863f72917744879ae34526e16a766719043
+
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, FACTORY_KEY), &factory);
@@ -108,6 +103,11 @@ impl PredictionMarket {
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, USDC_KEY), &usdc_token);
+
+        // Store oracle address
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, ORACLE_KEY), &oracle);
 
         // Store timing
         env.storage()
@@ -118,11 +118,7 @@ impl PredictionMarket {
             .persistent()
             .set(&Symbol::new(&env, RESOLUTION_TIME_KEY), &resolution_time);
 
-<<<<<<< HEAD
-        // Initialize market state as OPEN
-=======
-        // Initialize market state as open
->>>>>>> 0d438863f72917744879ae34526e16a766719043
+
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_OPEN);
@@ -141,22 +137,27 @@ impl PredictionMarket {
             .persistent()
             .set(&Symbol::new(&env, TOTAL_VOLUME_KEY), &0i128);
 
-<<<<<<< HEAD
-=======
+
         // Initialize pending count
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, PENDING_COUNT_KEY), &0u32);
 
->>>>>>> 0d438863f72917744879ae34526e16a766719043
         // Emit initialization event
         env.events().publish(
             (Symbol::new(&env, "market_initialized"),),
-            (market_id, creator, factory, closing_time, resolution_time),
+            (
+                market_id,
+                creator,
+                factory,
+                oracle,
+                closing_time,
+                resolution_time,
+            ),
         );
     }
 
-<<<<<<< HEAD
+
     /// Phase 1: User commits to a prediction (commit-reveal scheme for privacy)
     ///
     /// TODO: Commit Prediction
@@ -181,7 +182,6 @@ impl PredictionMarket {
         amount: i128,
     ) {
         todo!("See commit prediction TODO above")
-=======
     pub fn commit_prediction(
         env: Env,
         user: Address,
@@ -301,7 +301,6 @@ impl PredictionMarket {
         env.storage()
             .persistent()
             .get(&Symbol::new(&env, MARKET_STATE_KEY))
->>>>>>> 0d438863f72917744879ae34526e16a766719043
     }
 
     /// Phase 2: User reveals their committed prediction
@@ -333,17 +332,44 @@ impl PredictionMarket {
     }
 
     /// Close market for new predictions (auto-trigger at closing_time)
-    ///
-    /// TODO: Close Market
-    /// - Validate current timestamp >= closing_time
-    /// - Validate market state is OPEN
-    /// - Change market state to CLOSED
-    /// - Lock all remaining balances (no new predictions/trades)
-    /// - Freeze prediction pools (finalize odds)
-    /// - Emit MarketClosed(market_id, final_yes_pool, final_no_pool, timestamp)
-    /// - Record closing timestamp
     pub fn close_market(env: Env, market_id: BytesN<32>) {
-        todo!("See close market TODO above")
+        // Get current timestamp
+        let current_time = env.ledger().timestamp();
+
+        // Load closing time
+        let closing_time: u64 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, CLOSING_TIME_KEY))
+            .expect("Closing time not found");
+
+        // Validate current timestamp >= closing_time
+        if current_time < closing_time {
+            panic!("Cannot close market before closing time");
+        }
+
+        // Load current state
+        let current_state: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, MARKET_STATE_KEY))
+            .expect("Market state not found");
+
+        // Validate market state is OPEN
+        if current_state != STATE_OPEN {
+            panic!("Market not in OPEN state");
+        }
+
+        // Change market state to CLOSED
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_CLOSED);
+
+        // Emit MarketClosed Event (minimal)
+        env.events().publish(
+            (Symbol::new(&env, "market_closed"),),
+            (market_id, current_time),
+        );
     }
 
     /// Resolve market based on oracle consensus result
@@ -362,16 +388,126 @@ impl PredictionMarket {
     /// - Mark market as settled
     /// - Emit MarketResolved(market_id, winning_outcome, total_winners, timestamp)
     /// - Prepare treasury transfers for fee collection
-<<<<<<< HEAD
     pub fn resolve_market(
         env: Env,
         market_id: BytesN<32>,
         winning_outcome: u32,
     ) {
-=======
     pub fn resolve_market(env: Env, market_id: BytesN<32>, winning_outcome: u32) {
->>>>>>> 0d438863f72917744879ae34526e16a766719043
         todo!("See resolve market TODO above")
+
+    /// This function finalizes the market outcome based on oracle consensus.
+    /// It validates timing, checks oracle consensus, updates market state,
+    /// calculates winner/loser pools, and emits resolution event.
+    ///
+    /// # Panics
+    /// * If current time < resolution_time
+    /// * If market state is not CLOSED
+    /// * If oracle consensus has not been reached
+    /// * If market is already RESOLVED
+    pub fn resolve_market(env: Env, market_id: BytesN<32>) {
+        // Get current timestamp
+        let current_time = env.ledger().timestamp();
+
+        // Load resolution time from storage
+        let resolution_time: u64 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, RESOLUTION_TIME_KEY))
+            .expect("Resolution time not found");
+
+        // Validate: current timestamp >= resolution_time
+        if current_time < resolution_time {
+            panic!("Cannot resolve market before resolution time");
+        }
+
+        // Load current market state
+        let current_state: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, MARKET_STATE_KEY))
+            .expect("Market state not found");
+
+        // Validate: market state is CLOSED (not OPEN or already RESOLVED)
+        // If it is OPEN, it should be closed first (or we can panic and say close it first)
+        // Usually resolve happens after close.
+        if current_state == STATE_OPEN {
+            panic!("Cannot resolve market that is still OPEN");
+        }
+
+        if current_state == STATE_RESOLVED {
+            panic!("Market already resolved");
+        }
+
+        // Load oracle address
+        let oracle_address: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, ORACLE_KEY))
+            .expect("Oracle address not found");
+
+        // Create oracle client to check consensus
+        // Using crate::oracle to access the sibling module
+        let oracle_client = crate::oracle::OracleManagerClient::new(&env, &oracle_address);
+
+        // Check if oracle consensus has been reached
+        let (consensus_reached, final_outcome) = oracle_client.check_consensus(&market_id);
+
+        if !consensus_reached {
+            panic!("Oracle consensus not reached");
+        }
+
+        // Validate outcome is binary (0 or 1)
+        if final_outcome > 1 {
+            panic!("Invalid oracle outcome");
+        }
+
+        // Store winning outcome
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, WINNING_OUTCOME_KEY), &final_outcome);
+
+        // Load pool sizes
+        let yes_pool: i128 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, YES_POOL_KEY))
+            .unwrap_or(0);
+
+        let no_pool: i128 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, NO_POOL_KEY))
+            .unwrap_or(0);
+
+        // Calculate winner and loser shares
+        let (winner_shares, loser_shares) = if final_outcome == 1 {
+            // YES won
+            (yes_pool, no_pool)
+        } else {
+            // NO won
+            (no_pool, yes_pool)
+        };
+
+        // Store winner and loser shares for payout calculations
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, WINNER_SHARES_KEY), &winner_shares);
+
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, LOSER_SHARES_KEY), &loser_shares);
+
+        // Update market state to RESOLVED
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_RESOLVED);
+
+        // Emit MarketResolved event
+        env.events().publish(
+            (Symbol::new(&env, "market_resolved"),),
+            (market_id, final_outcome, current_time),
+        );
     }
 
     /// Dispute market resolution within 7-day window
@@ -386,16 +522,13 @@ impl PredictionMarket {
     /// - Increment dispute counter
     /// - Emit MarketDisputed(user, reason, market_id, timestamp)
     /// - Notify admin of dispute
-<<<<<<< HEAD
     pub fn dispute_market(
         env: Env,
         user: Address,
         market_id: BytesN<32>,
         dispute_reason: Symbol,
     ) {
-=======
     pub fn dispute_market(env: Env, user: Address, market_id: BytesN<32>, dispute_reason: Symbol) {
->>>>>>> 0d438863f72917744879ae34526e16a766719043
         todo!("See dispute market TODO above")
     }
 
@@ -431,15 +564,12 @@ impl PredictionMarket {
     /// - Transfer refund from treasury to user
     /// - Mark as refunded
     /// - Emit LosingBetRefunded(user, market_id, refund_amount, timestamp)
-<<<<<<< HEAD
     pub fn refund_losing_bet(
         env: Env,
         user: Address,
         market_id: BytesN<32>,
     ) -> i128 {
-=======
     pub fn refund_losing_bet(env: Env, user: Address, market_id: BytesN<32>) -> i128 {
->>>>>>> 0d438863f72917744879ae34526e16a766719043
         todo!("See refund losing bet TODO above")
     }
 
@@ -466,15 +596,12 @@ impl PredictionMarket {
     /// - Include: commit timestamp, reveal timestamp, claim timestamp
     /// - Include potential payout if market is unresolved
     /// - Handle: user has no prediction (return error)
-<<<<<<< HEAD
     pub fn get_user_prediction(
         env: Env,
         user: Address,
         market_id: BytesN<32>,
     ) -> Symbol {
-=======
     pub fn get_user_prediction(env: Env, user: Address, market_id: BytesN<32>) -> Symbol {
->>>>>>> 0d438863f72917744879ae34526e16a766719043
         todo!("See get user prediction TODO above")
     }
 
@@ -526,5 +653,218 @@ impl PredictionMarket {
     /// - Emit MarketCancelled(market_id, reason, creator, timestamp)
     pub fn cancel_market(env: Env, creator: Address, market_id: BytesN<32>) {
         todo!("See cancel market TODO above")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        Address, BytesN, Env,
+    };
+
+    // Mock Oracle for testing
+    #[contract]
+    pub struct MockOracle;
+
+    #[contractimpl]
+    impl MockOracle {
+        pub fn initialize(_env: Env) {}
+
+        pub fn check_consensus(env: Env, _market_id: BytesN<32>) -> (bool, u32) {
+            let reached = env.storage()
+                .instance()
+                .get(&Symbol::new(&env, "consensus"))
+                .unwrap_or(true);
+            let outcome = env.storage()
+                .instance()
+                .get(&Symbol::new(&env, "outcome"))
+                .unwrap_or(1u32);
+            (reached, outcome)
+        }
+
+        pub fn get_consensus_result(env: Env, _market_id: BytesN<32>) -> u32 {
+            env.storage()
+                .instance()
+                .get(&Symbol::new(&env, "outcome"))
+                .unwrap_or(1u32)
+        }
+
+        // Test helpers to configure the mock
+        pub fn set_consensus_status(env: Env, reachable: bool) {
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "consensus"), &reachable);
+        }
+
+        pub fn set_outcome_value(env: Env, outcome: u32) {
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "outcome"), &outcome);
+        }
+    }
+
+    #[test]
+    fn test_resolve_market_happy_path() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Register contracts
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+
+        let oracle_contract_id = env.register(MockOracle, ());
+
+        let creator = Address::generate(&env);
+        let factory = Address::generate(&env);
+        let usdc = Address::generate(&env);
+
+        // Setup times
+        let start_time = 1000;
+        let closing_time = 2000;
+        let resolution_time = 3000;
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = start_time;
+        });
+
+        // Initialize market
+        market_client.initialize(
+            &market_id_bytes,
+            &creator,
+            &factory,
+            &usdc,
+            &oracle_contract_id,
+            &closing_time,
+            &resolution_time,
+        );
+
+        // Advance time to closing
+        env.ledger().with_mut(|li| {
+            li.timestamp = closing_time + 10;
+        });
+
+        // Close market
+        market_client.close_market(&market_id_bytes);
+
+        // Advance time to resolution
+        env.ledger().with_mut(|li| {
+            li.timestamp = resolution_time + 10;
+        });
+
+        // Resolve market
+        market_client.resolve_market(&market_id_bytes);
+    }
+
+    #[test]
+    #[should_panic(expected = "Market already resolved")]
+    fn test_resolve_market_twice_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+
+        let oracle_contract_id = env.register(MockOracle, ());
+
+        market_client.initialize(
+            &market_id_bytes,
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &oracle_contract_id,
+            &2000,
+            &3000,
+        );
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 2010;
+        });
+        market_client.close_market(&market_id_bytes);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 3010;
+        });
+        market_client.resolve_market(&market_id_bytes);
+
+        // Second call should panic
+        market_client.resolve_market(&market_id_bytes);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot resolve market before resolution time")]
+    fn test_resolve_before_resolution_time() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+        let oracle_contract_id = env.register(MockOracle, ());
+        let creator = Address::generate(&env);
+
+        // Setup times
+        let resolution_time = 3000;
+
+        market_client.initialize(
+            &market_id_bytes,
+            &creator,
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &oracle_contract_id,
+            &2000,
+            &resolution_time,
+        );
+
+        // Advance time but NOT enough
+        env.ledger().with_mut(|li| {
+            li.timestamp = resolution_time - 10;
+        });
+
+        market_client.resolve_market(&market_id_bytes);
+    }
+
+    #[test]
+    #[should_panic(expected = "Oracle consensus not reached")]
+    fn test_resolve_without_consensus() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+        let oracle_contract_id = env.register(MockOracle, ());
+        let oracle_client = MockOracleClient::new(&env, &oracle_contract_id);
+
+        let resolution_time = 3000;
+
+        market_client.initialize(
+            &market_id_bytes,
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &oracle_contract_id,
+            &2000,
+            &resolution_time,
+        );
+
+        // Advance time to closing
+        env.ledger().with_mut(|li| {
+            li.timestamp = 2010;
+        });
+        market_client.close_market(&market_id_bytes);
+
+        // Advance time to resolution
+        env.ledger().with_mut(|li| {
+            li.timestamp = resolution_time + 10;
+        });
+
+        // Simuate Oracle Consensus NOT reached
+        oracle_client.set_consensus_status(&false);
+
+        market_client.resolve_market(&market_id_bytes);
     }
 }

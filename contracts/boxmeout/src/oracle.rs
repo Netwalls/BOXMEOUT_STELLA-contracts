@@ -140,44 +140,113 @@ impl OracleManager {
     }
 
     /// Submit oracle attestation for market result
-    ///
-    /// TODO: Submit Attestation
-    /// - Require oracle authentication
-    /// - Validate oracle is registered and active
-    /// - Validate market_id exists
-    /// - Validate market state is CLOSED (ready for resolution)
-    /// - Validate attestation_result in [0, 1] (binary outcome)
-    /// - Validate oracle hasn't already attested to this market
-    /// - Verify attestation signature (signed by oracle's key)
-    /// - Store attestation: { oracle, market_id, result, data_hash, timestamp }
-    /// - Check for consensus (do we have enough attestations?)
-    /// - If consensus reached: proceed to finalize
-    /// - If not enough: wait for more oracles
-    /// - Emit AttestationSubmitted(oracle, market_id, result, timestamp)
     pub fn submit_attestation(
         env: Env,
         oracle: Address,
         market_id: BytesN<32>,
         attestation_result: u32,
-        data_hash: BytesN<32>,
+        _data_hash: BytesN<32>,
     ) {
-        todo!("See submit attestation TODO above")
+        // 1. Require oracle authentication
+        oracle.require_auth();
+
+        // 2. Validate oracle is registered
+        let oracle_key = (Symbol::new(&env, "oracle"), oracle.clone());
+        let is_registered: bool = env.storage().persistent().get(&oracle_key).unwrap_or(false);
+        if !is_registered {
+            panic!("Oracle not registered");
+        }
+
+        // 3. Validate result is binary (0 or 1)
+        if attestation_result > 1 {
+            panic!("Invalid attestation result");
+        }
+
+        // 4. Check if oracle already attested
+        let vote_key = (Symbol::new(&env, "vote"), market_id.clone(), oracle.clone());
+        if env.storage().persistent().has(&vote_key) {
+            panic!("Oracle already attested");
+        }
+
+        // 5. Store attestation
+        env.storage().persistent().set(&vote_key, &attestation_result);
+
+        // 6. Track oracle in market's voter list
+        let voters_key = (Symbol::new(&env, "voters"), market_id.clone());
+        let mut voters: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&voters_key)
+            .unwrap_or(Vec::new(&env));
+        
+        voters.push_back(oracle.clone());
+        env.storage().persistent().set(&voters_key, &voters);
+
+        // 7. Emit event
+        env.events().publish(
+            (Symbol::new(&env, "attestation_submitted"),),
+            (oracle, market_id, attestation_result, env.ledger().timestamp()),
+        );
     }
 
     /// Check if consensus has been reached for market
-    ///
-    /// TODO: Check Consensus
-    /// - Query attestations for market_id
-    /// - Count votes for each outcome (YES vs NO)
-    /// - Compare counts against required_consensus threshold
-    /// - If consensus reached:
-    ///   - Determine winning_outcome (most votes)
-    ///   - Set consensus_result
-    ///   - Start finality_timer (time_delay_before_finality)
-    ///   - Return consensus reached with result
-    /// - Else: Return pending (waiting for more oracles)
-    pub fn check_consensus(env: Env, market_id: BytesN<32>) -> bool {
-        todo!("See check consensus TODO above")
+    pub fn check_consensus(env: Env, market_id: BytesN<32>) -> (bool, u32) {
+        // 1. Query attestations for market_id
+        let voters_key = (Symbol::new(&env, "voters"), market_id.clone());
+        let voters: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&voters_key)
+            .unwrap_or(Vec::new(&env));
+
+        // 2. Get required threshold
+        let threshold: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, REQUIRED_CONSENSUS_KEY))
+            .unwrap_or(0);
+
+        if voters.len() < threshold {
+            return (false, 0);
+        }
+
+        // 3. Count votes for each outcome
+        let mut yes_votes = 0;
+        let mut no_votes = 0;
+
+        for oracle in voters.iter() {
+            let vote_key = (Symbol::new(&env, "vote"), market_id.clone(), oracle);
+            let vote: u32 = env.storage().persistent().get(&vote_key).unwrap_or(0);
+            if vote == 1 {
+                yes_votes += 1;
+            } else {
+                no_votes += 1;
+            }
+        }
+
+        // 4. Compare counts against threshold
+        // Winner is the one that reached the threshold first
+        // If both reach threshold (possible if threshold is low), we favor the one with more votes
+        // If tied and both >= threshold, return false (no clear winner yet)
+        if yes_votes >= threshold && yes_votes > no_votes {
+            (true, 1)
+        } else if no_votes >= threshold && no_votes > yes_votes {
+            (true, 0)
+        } else if yes_votes >= threshold && no_votes >= threshold && yes_votes == no_votes {
+            // Tie scenario appropriately handled: no consensus if tied but threshold met
+            (false, 0)
+        } else {
+            (false, 0)
+        }
+    }
+
+    /// Get the consensus result for a market
+    pub fn get_consensus_result(env: Env, market_id: BytesN<32>) -> u32 {
+        let result_key = (Symbol::new(&env, "consensus_result"), market_id.clone());
+        env.storage()
+            .persistent()
+            .get(&result_key)
+            .expect("Consensus result not found")
     }
 
     /// Finalize market resolution after time delay

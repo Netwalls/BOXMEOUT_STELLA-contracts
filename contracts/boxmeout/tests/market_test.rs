@@ -1,7 +1,6 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-<<<<<<< HEAD
     testutils::{Address as _, Ledger},
     Address, BytesN, Env, Symbol,
 };
@@ -14,7 +13,6 @@ fn create_test_env() -> Env {
 
 fn register_market(env: &Env) -> Address {
     env.register_contract(None, MarketContract)
-=======
     testutils::{
         Address as _, AuthorizedFunction, AuthorizedInvocation, Events, Ledger, LedgerInfo,
     },
@@ -42,7 +40,7 @@ fn create_test_env() -> Env {
 
 // Helper to register market contract
 fn register_market(env: &Env) -> Address {
-    env.register_contract(None, boxmeout::PredictionMarket)
+    env.register(boxmeout::PredictionMarket, ())
 }
 
 // Helper to create and register a mock USDC token
@@ -80,23 +78,24 @@ fn setup_test_market(
     // Mock all auth for the test environment
     env.mock_all_auths();
 
+    let oracle = Address::generate(env);
+
     client.initialize(
         &market_id,
         &creator,
         &factory,
         &usdc_address,
+        &oracle,
         &closing_time,
         &resolution_time,
     );
 
     (client, market_id, creator, admin, usdc_address)
->>>>>>> 0d438863f72917744879ae34526e16a766719043
 }
 
 #[test]
 fn test_market_initialize() {
     let env = create_test_env();
-<<<<<<< HEAD
     let market_id_contract = register_market(&env);
     let client = MarketContractClient::new(&env, &market_id_contract);
 
@@ -109,7 +108,7 @@ fn test_market_initialize() {
     let resolution_time = closing_time + 3600;
 
     // Initialize market
-=======
+
     let market_contract = register_market(&env);
     let client = PredictionMarketClient::new(&env, &market_contract);
 
@@ -124,7 +123,7 @@ fn test_market_initialize() {
     // Mock auth for test
     env.mock_all_auths();
 
->>>>>>> 0d438863f72917744879ae34526e16a766719043
+
     client.initialize(
         &market_id,
         &creator,
@@ -134,7 +133,6 @@ fn test_market_initialize() {
         &resolution_time,
     );
 
-<<<<<<< HEAD
     // TODO: Add getters to verify state
     // Verify market state is OPEN
     // Verify pools initialized to 0
@@ -154,11 +152,14 @@ fn test_commit_prediction() {
     let closing_time = env.ledger().timestamp() + 86400;
     let resolution_time = closing_time + 3600;
 
+    let oracle = Address::generate(&env);
+
     client.initialize(
         &market_id,
         &creator,
         &factory,
         &usdc_token,
+        &oracle,
         &closing_time,
         &resolution_time,
     );
@@ -207,7 +208,6 @@ fn test_commit_prediction_after_closing_fails() {
 }
 
 #[test]
-=======
     // Verify market state is OPEN (0)
     let state = client.get_market_state_value();
     assert_eq!(state, Some(0));
@@ -486,7 +486,6 @@ fn test_commit_market_not_open() {
 // (To be implemented in the next phase)
 
 #[test]
->>>>>>> 0d438863f72917744879ae34526e16a766719043
 fn test_reveal_prediction() {
     // TODO: Implement when reveal_prediction is ready
     // Test valid reveal with correct hash
@@ -495,7 +494,6 @@ fn test_reveal_prediction() {
 }
 
 #[test]
-<<<<<<< HEAD
 #[should_panic(expected = "invalid hash")]
 fn test_reveal_prediction_wrong_salt() {
     // TODO: Implement when reveal_prediction is ready
@@ -503,8 +501,7 @@ fn test_reveal_prediction_wrong_salt() {
 }
 
 #[test]
-=======
->>>>>>> 0d438863f72917744879ae34526e16a766719043
+
 fn test_resolve_market() {
     // TODO: Implement when resolve_market is ready
     // Test oracle resolves market
@@ -519,12 +516,10 @@ fn test_claim_winnings() {
     // Test loser cannot claim
     // Test double claim fails
 }
-<<<<<<< HEAD
 
 #[test]
 fn test_get_market_state() {
     // TODO: Implement when getter is ready
     // Test market state transitions: OPEN -> CLOSED -> RESOLVED
 }
-=======
->>>>>>> 0d438863f72917744879ae34526e16a766719043
+

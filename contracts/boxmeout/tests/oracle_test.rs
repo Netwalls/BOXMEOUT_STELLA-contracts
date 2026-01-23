@@ -24,10 +24,8 @@ fn test_oracle_initialize() {
     let admin = Address::generate(&env);
     let required_consensus = 2u32; // 2 of 3 oracles
 
-<<<<<<< HEAD
-=======
+
     env.mock_all_auths();
->>>>>>> 0d438863f72917744879ae34526e16a766719043
     client.initialize(&admin, &required_consensus);
 
     // TODO: Add getters to verify
@@ -100,11 +98,8 @@ fn test_register_oracle_exceeds_limit() {
 }
 
 #[test]
-<<<<<<< HEAD
 #[should_panic(expected = "oracle already registered")]
-=======
 #[should_panic]
->>>>>>> 0d438863f72917744879ae34526e16a766719043
 fn test_register_duplicate_oracle() {
     let env = create_test_env();
     env.mock_all_auths();
@@ -127,44 +122,129 @@ fn test_register_duplicate_oracle() {
 
 #[test]
 fn test_submit_attestation() {
-    // TODO: Implement when submit_attestation is ready
-    // Oracle submits outcome for a market
-    // Test multiple oracles submit
+    let env = create_test_env();
+    env.mock_all_auths();
+
+    let oracle_id = register_oracle(&env);
+    let client = OracleManagerClient::new(&env, &oracle_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &2u32);
+
+    let oracle1 = Address::generate(&env);
+    client.register_oracle(&oracle1, &Symbol::new(&env, "Oracle1"));
+
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let result = 1u32; // YES
+    let data_hash = BytesN::from_array(&env, &[0u8; 32]);
+
+    client.submit_attestation(&oracle1, &market_id, &result, &data_hash);
+
+    // Verify consensus is still false (need 2 votes)
+    let (reached, outcome) = client.check_consensus(&market_id);
+    assert!(!reached);
+    assert_eq!(outcome, 0);
 }
 
 #[test]
 fn test_check_consensus_reached() {
-    // TODO: Implement when check_consensus is ready
-    // Register 3 oracles
-    // 2 oracles submit outcome YES
-    // 1 oracle submits outcome NO
-    // Verify consensus = YES (2 of 3)
+    let env = create_test_env();
+    env.mock_all_auths();
+
+    let oracle_id = register_oracle(&env);
+    let client = OracleManagerClient::new(&env, &oracle_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &2u32);
+
+    let oracle1 = Address::generate(&env);
+    let oracle2 = Address::generate(&env);
+    let oracle3 = Address::generate(&env);
+
+    client.register_oracle(&oracle1, &Symbol::new(&env, "Oracle1"));
+    client.register_oracle(&oracle2, &Symbol::new(&env, "Oracle2"));
+    client.register_oracle(&oracle3, &Symbol::new(&env, "Oracle3"));
+
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let data_hash = BytesN::from_array(&env, &[0u8; 32]);
+
+    // 2 oracles submit YES (1)
+    client.submit_attestation(&oracle1, &market_id, &1u32, &data_hash);
+    client.submit_attestation(&oracle2, &market_id, &1u32, &data_hash);
+
+    // Verify consensus reached YES
+    let (reached, outcome) = client.check_consensus(&market_id);
+    assert!(reached);
+    assert_eq!(outcome, 1);
 }
 
 #[test]
 fn test_check_consensus_not_reached() {
-    // TODO: Implement when check_consensus is ready
-    // Only 1 of 3 oracles submit
-    // Consensus not reached yet
+    let env = create_test_env();
+    env.mock_all_auths();
+
+    let oracle_id = register_oracle(&env);
+    let client = OracleManagerClient::new(&env, &oracle_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &3u32); // Need 3 oracles
+
+    let oracle1 = Address::generate(&env);
+    let oracle2 = Address::generate(&env);
+    client.register_oracle(&oracle1, &Symbol::new(&env, "Oracle1"));
+    client.register_oracle(&oracle2, &Symbol::new(&env, "Oracle2"));
+
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let data_hash = BytesN::from_array(&env, &[0u8; 32]);
+
+    client.submit_attestation(&oracle1, &market_id, &1u32, &data_hash);
+    client.submit_attestation(&oracle2, &market_id, &1u32, &data_hash);
+
+    // Only 2 of 3 votes, consensus not reached
+    let (reached, _) = client.check_consensus(&market_id);
+    assert!(!reached);
 }
 
 #[test]
-fn test_resolve_market_with_consensus() {
-    // TODO: Implement when resolve_market is ready
-    // 2 of 3 oracles agree on YES
-    // Market resolves to YES
-}
 
-#[test]
-<<<<<<< HEAD
-=======
 #[ignore]
->>>>>>> 0d438863f72917744879ae34526e16a766719043
 #[should_panic(expected = "consensus not reached")]
 fn test_resolve_market_without_consensus() {
     // TODO: Implement when resolve_market is ready
     // Only 1 oracle submitted
     // Cannot resolve yet
+fn test_check_consensus_tie_handling() {
+    let env = create_test_env();
+    env.mock_all_auths();
+
+    let oracle_id = register_oracle(&env);
+    let client = OracleManagerClient::new(&env, &oracle_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &2u32); // threshold 2
+
+    let oracle1 = Address::generate(&env);
+    let oracle2 = Address::generate(&env);
+    let oracle3 = Address::generate(&env);
+    let oracle4 = Address::generate(&env);
+
+    client.register_oracle(&oracle1, &Symbol::new(&env, "O1"));
+    client.register_oracle(&oracle2, &Symbol::new(&env, "O2"));
+    client.register_oracle(&oracle3, &Symbol::new(&env, "O3"));
+    client.register_oracle(&oracle4, &Symbol::new(&env, "O4"));
+
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let data_hash = BytesN::from_array(&env, &[0u8; 32]);
+
+    // 2 vote YES, 2 vote NO
+    client.submit_attestation(&oracle1, &market_id, &1u32, &data_hash);
+    client.submit_attestation(&oracle2, &market_id, &1u32, &data_hash);
+    client.submit_attestation(&oracle3, &market_id, &0u32, &data_hash);
+    client.submit_attestation(&oracle4, &market_id, &0u32, &data_hash);
+
+    // Both reached threshold 2, but it's a tie
+    let (reached, _) = client.check_consensus(&market_id);
+    assert!(!reached);
 }
 
 #[test]
