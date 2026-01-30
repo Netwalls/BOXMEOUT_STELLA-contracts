@@ -20,9 +20,12 @@ mod market;
 pub use market::*;
 
 // TREASURY CONTRACT
-// mod treasury;
-// pub use treasury::*;
+mod treasury;
+pub use treasury::*;
 
 // ORACLE CONTRACT (required by market for resolution)
 mod oracle;
 pub use oracle::*;
+
+#[cfg(test)]
+mod treasury_integration_tests;
