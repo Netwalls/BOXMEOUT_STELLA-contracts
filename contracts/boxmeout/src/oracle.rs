@@ -144,7 +144,9 @@ impl OracleManager {
 
         // Store market resolution time
         let market_key = (Symbol::new(&env, MARKET_RES_TIME_KEY), market_id.clone());
-        env.storage().persistent().set(&market_key, &resolution_time);
+        env.storage()
+            .persistent()
+            .set(&market_key, &resolution_time);
 
         // Initialize attestation counts for this market
         let yes_count_key = (Symbol::new(&env, ATTEST_COUNT_YES_KEY), market_id.clone());
@@ -169,21 +171,25 @@ impl OracleManager {
     pub fn get_attestation_counts(env: Env, market_id: BytesN<32>) -> (u32, u32) {
         let yes_count_key = (Symbol::new(&env, ATTEST_COUNT_YES_KEY), market_id.clone());
         let no_count_key = (Symbol::new(&env, ATTEST_COUNT_NO_KEY), market_id);
-        
+
         let yes_count: u32 = env.storage().persistent().get(&yes_count_key).unwrap_or(0);
         let no_count: u32 = env.storage().persistent().get(&no_count_key).unwrap_or(0);
-        
+
         (yes_count, no_count)
     }
 
     /// Get attestation record for an oracle on a market
-    pub fn get_attestation(env: Env, market_id: BytesN<32>, oracle: Address) -> Option<Attestation> {
+    pub fn get_attestation(
+        env: Env,
+        market_id: BytesN<32>,
+        oracle: Address,
+    ) -> Option<Attestation> {
         let attestation_key = (Symbol::new(&env, "attestation"), market_id, oracle);
         env.storage().persistent().get(&attestation_key)
     }
 
     /// Submit oracle attestation for market result
-    /// 
+    ///
     /// Validates:
     /// - Caller is a trusted attestor (registered oracle)
     /// - Market is past resolution_time
@@ -213,7 +219,7 @@ impl OracleManager {
             .persistent()
             .get(&market_key)
             .expect("Market not registered");
-        
+
         let current_time = env.ledger().timestamp();
         if current_time < resolution_time {
             panic!("Cannot attest before resolution time");
@@ -241,8 +247,14 @@ impl OracleManager {
             outcome: attestation_result,
             timestamp: current_time,
         };
-        let attestation_key = (Symbol::new(&env, "attestation"), market_id.clone(), oracle.clone());
-        env.storage().persistent().set(&attestation_key, &attestation);
+        let attestation_key = (
+            Symbol::new(&env, "attestation"),
+            market_id.clone(),
+            oracle.clone(),
+        );
+        env.storage()
+            .persistent()
+            .set(&attestation_key, &attestation);
 
         // 8. Track oracle in market's voter list
         let voters_key = (Symbol::new(&env, "voters"), market_id.clone());
@@ -259,11 +271,15 @@ impl OracleManager {
         if attestation_result == 1 {
             let yes_count_key = (Symbol::new(&env, ATTEST_COUNT_YES_KEY), market_id.clone());
             let current_count: u32 = env.storage().persistent().get(&yes_count_key).unwrap_or(0);
-            env.storage().persistent().set(&yes_count_key, &(current_count + 1));
+            env.storage()
+                .persistent()
+                .set(&yes_count_key, &(current_count + 1));
         } else {
             let no_count_key = (Symbol::new(&env, ATTEST_COUNT_NO_KEY), market_id.clone());
             let current_count: u32 = env.storage().persistent().get(&no_count_key).unwrap_or(0);
-            env.storage().persistent().set(&no_count_key, &(current_count + 1));
+            env.storage()
+                .persistent()
+                .set(&no_count_key, &(current_count + 1));
         }
 
         // 10. Emit AttestationSubmitted(market_id, attestor, outcome)

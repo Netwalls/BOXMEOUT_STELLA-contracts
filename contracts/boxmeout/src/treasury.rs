@@ -31,7 +31,11 @@ impl Treasury {
     /// Initialize Treasury contract
     pub fn initialize(env: Env, admin: Address, usdc_contract: Address, factory: Address) {
         // Check if already initialized
-        if env.storage().persistent().has(&Symbol::new(&env, ADMIN_KEY)) {
+        if env
+            .storage()
+            .persistent()
+            .has(&Symbol::new(&env, ADMIN_KEY))
+        {
             panic!("Already initialized");
         }
 
@@ -95,7 +99,11 @@ impl Treasury {
         creator_fee_pct: u32,
     ) {
         // Require admin authentication
-        let admin: Address = env.storage().persistent().get(&Symbol::new(&env, ADMIN_KEY)).expect("Not initialized");
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, ADMIN_KEY))
+            .expect("Not initialized");
         admin.require_auth();
 
         // Validate platform_fee + leaderboard_fee + creator_fee = 100%
@@ -116,7 +124,12 @@ impl Treasury {
         // Emit FeeDistributionUpdated event
         env.events().publish(
             (Symbol::new(&env, "FeeDistributionUpdated"),),
-            (platform_fee_pct, leaderboard_fee_pct, creator_fee_pct, env.ledger().timestamp()),
+            (
+                platform_fee_pct,
+                leaderboard_fee_pct,
+                creator_fee_pct,
+                env.ledger().timestamp(),
+            ),
         );
     }
 
@@ -128,7 +141,11 @@ impl Treasury {
         }
 
         // Get USDC token contract
-        let usdc_token: Address = env.storage().persistent().get(&Symbol::new(&env, USDC_KEY)).expect("USDC not set");
+        let usdc_token: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, USDC_KEY))
+            .expect("USDC not set");
         let token_client = token::Client::new(&env, &usdc_token);
         let treasury_address = env.current_contract_address();
 
@@ -137,7 +154,11 @@ impl Treasury {
         token_client.transfer(&source, &treasury_address, &amount);
 
         // Get current ratios
-        let ratios: FeeRatios = env.storage().persistent().get(&Symbol::new(&env, DISTRIBUTION_KEY)).expect("Ratios not set");
+        let ratios: FeeRatios = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, DISTRIBUTION_KEY))
+            .expect("Ratios not set");
 
         // Calculate shares
         let platform_share = (amount * ratios.platform as i128) / 100;
@@ -152,7 +173,11 @@ impl Treasury {
 
         // Emit FeeCollected(source, amount, timestamp)
         env.events().publish(
-            (Symbol::new(&env, "FeeCollected"), source, (Symbol::new(&env, "fee_source"),)),
+            (
+                Symbol::new(&env, "FeeCollected"),
+                source,
+                (Symbol::new(&env, "fee_source"),),
+            ),
             (amount, env.ledger().timestamp()),
         );
     }
@@ -254,7 +279,11 @@ impl Treasury {
 
     /// Get treasury balance (total USDC held)
     pub fn get_treasury_balance(env: Env) -> i128 {
-        let usdc_token: Address = env.storage().persistent().get(&Symbol::new(&env, USDC_KEY)).expect("USDC not set");
+        let usdc_token: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, USDC_KEY))
+            .expect("USDC not set");
         let token_client = token::Client::new(&env, &usdc_token);
         token_client.balance(&env.current_contract_address())
     }
@@ -262,12 +291,20 @@ impl Treasury {
     /// Emergency withdrawal of funds
     pub fn emergency_withdraw(env: Env, admin: Address, recipient: Address, amount: i128) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().persistent().get(&Symbol::new(&env, ADMIN_KEY)).expect("Not initialized");
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, ADMIN_KEY))
+            .expect("Not initialized");
         if admin != stored_admin {
             panic!("Unauthorized");
         }
 
-        let usdc_token: Address = env.storage().persistent().get(&Symbol::new(&env, USDC_KEY)).expect("USDC not set");
+        let usdc_token: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, USDC_KEY))
+            .expect("USDC not set");
         let token_client = token::Client::new(&env, &usdc_token);
         token_client.transfer(&env.current_contract_address(), &recipient, &amount);
 
@@ -279,7 +316,8 @@ impl Treasury {
 }
 
 fn update_pool_balance(env: &Env, key: &str, delta: i128) {
-    let current: i128 = env.storage()
+    let current: i128 = env
+        .storage()
         .persistent()
         .get(&Symbol::new(env, key))
         .unwrap_or(0);
@@ -301,18 +339,26 @@ mod tests {
         token::StellarAssetClient::new(env, &token_address)
     }
 
-    fn setup_treasury(env: &Env) -> (TreasuryClient, token::StellarAssetClient, Address, Address, Address) {
+    fn setup_treasury(
+        env: &Env,
+    ) -> (
+        TreasuryClient,
+        token::StellarAssetClient,
+        Address,
+        Address,
+        Address,
+    ) {
         let admin = Address::generate(env);
         let usdc_admin = Address::generate(env);
         let usdc_client = create_token_contract(env, &usdc_admin);
         let factory = Address::generate(env);
-        
+
         let treasury_id = env.register(Treasury, ());
         let treasury_client = TreasuryClient::new(env, &treasury_id);
-        
+
         env.mock_all_auths();
         treasury_client.initialize(&admin, &usdc_client.address, &factory);
-        
+
         (treasury_client, usdc_client, admin, usdc_admin, factory)
     }
 
@@ -320,7 +366,7 @@ mod tests {
     fn test_initialize() {
         let env = Env::default();
         let (treasury, usdc, admin, _, factory) = setup_treasury(&env);
-        
+
         assert_eq!(treasury.get_platform_fees(), 0);
         assert_eq!(treasury.get_leaderboard_fees(), 0);
         assert_eq!(treasury.get_creator_fees(), 0);
@@ -332,14 +378,14 @@ mod tests {
         let env = Env::default();
         let (treasury, usdc, admin, _, _) = setup_treasury(&env);
         let source = Address::generate(&env);
-        
+
         // Mint tokens to source
         usdc.mint(&source, &1000);
-        
+
         // Deposit 1000 USDC
         // Default ratios: 50% Platform, 30% Leaderboard, 20% Creator
         treasury.deposit_fees(&source, &1000);
-        
+
         assert_eq!(treasury.get_platform_fees(), 500);
         assert_eq!(treasury.get_leaderboard_fees(), 300);
         assert_eq!(treasury.get_creator_fees(), 200);
@@ -353,13 +399,13 @@ mod tests {
         let env = Env::default();
         let (treasury, usdc, admin, _, _) = setup_treasury(&env);
         let source = Address::generate(&env);
-        
+
         // Update ratios: 40% Platform, 40% Leaderboard, 20% Creator
         treasury.set_fee_distribution(&40, &40, &20);
-        
+
         usdc.mint(&source, &1000);
         treasury.deposit_fees(&source, &1000);
-        
+
         assert_eq!(treasury.get_platform_fees(), 400);
         assert_eq!(treasury.get_leaderboard_fees(), 400);
         assert_eq!(treasury.get_creator_fees(), 200);
@@ -380,16 +426,16 @@ mod tests {
         let source = Address::generate(&env);
         let creator1 = Address::generate(&env);
         let creator2 = Address::generate(&env);
-        
+
         usdc.mint(&source, &1000);
         treasury.deposit_fees(&source, &1000); // 200 goes to creator pool
-        
+
         let mut distributions = soroban_sdk::Vec::new(&env);
         distributions.push_back((creator1.clone(), 150));
         distributions.push_back((creator2.clone(), 50));
-        
+
         treasury.distribute_creator_rewards(&admin, &distributions);
-        
+
         assert_eq!(usdc.balance(&creator1), 150);
         assert_eq!(usdc.balance(&creator2), 50);
         assert_eq!(treasury.get_creator_fees(), 0);
@@ -402,12 +448,12 @@ mod tests {
         let (treasury, usdc, admin, _, _) = setup_treasury(&env);
         let recipient = Address::generate(&env);
         let source = Address::generate(&env);
-        
+
         usdc.mint(&source, &1000);
         treasury.deposit_fees(&source, &1000);
-        
+
         treasury.emergency_withdraw(&admin, &recipient, &500);
-        
+
         assert_eq!(usdc.balance(&recipient), 500);
         assert_eq!(treasury.get_treasury_balance(), 500);
     }

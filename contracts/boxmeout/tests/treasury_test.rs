@@ -108,9 +108,10 @@ fn test_distribute_creator_rewards_happy_path() {
     usdc_client.mint(&treasury_id, &1_000_000);
 
     env.as_contract(&treasury_id, || {
-        env.storage()
-            .persistent()
-            .set(&soroban_sdk::Symbol::new(&env, "creator_fees"), &1_000_000i128);
+        env.storage().persistent().set(
+            &soroban_sdk::Symbol::new(&env, "creator_fees"),
+            &1_000_000i128,
+        );
     });
 
     let creator1 = Address::generate(&env);
@@ -167,9 +168,10 @@ fn test_distribute_creator_rewards_insufficient_balance() {
     client.initialize(&admin, &usdc_contract, &factory);
 
     env.as_contract(&treasury_id, || {
-        env.storage()
-            .persistent()
-            .set(&soroban_sdk::Symbol::new(&env, "creator_fees"), &500_000i128);
+        env.storage().persistent().set(
+            &soroban_sdk::Symbol::new(&env, "creator_fees"),
+            &500_000i128,
+        );
     });
 
     let creator = Address::generate(&env);
@@ -198,9 +200,10 @@ fn test_distribute_creator_rewards_event_emitted() {
     usdc_client.mint(&treasury_id, &1_000_000);
 
     env.as_contract(&treasury_id, || {
-        env.storage()
-            .persistent()
-            .set(&soroban_sdk::Symbol::new(&env, "creator_fees"), &1_000_000i128);
+        env.storage().persistent().set(
+            &soroban_sdk::Symbol::new(&env, "creator_fees"),
+            &1_000_000i128,
+        );
     });
 
     let creator1 = Address::generate(&env);

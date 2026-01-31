@@ -613,10 +613,10 @@ impl PredictionMarket {
                 .persistent()
                 .get(&Symbol::new(&env, FACTORY_KEY))
                 .expect("Factory address not set");
-            
+
             let factory_client = crate::factory::MarketFactoryClient::new(&env, &factory_address);
             let treasury_address = factory_client.get_treasury();
-            
+
             let treasury_client = crate::treasury::TreasuryClient::new(&env, &treasury_address);
             // Market contract is the source of the fee
             treasury_client.deposit_fees(&contract_address, &fee);
