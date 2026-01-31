@@ -1,22 +1,18 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, Events},
-    testutils::{Address as _, Ledger},
-    token::{StellarAssetClient, TokenClient},
-    Address, Address, BytesN, BytesN, Env, Env, IntoVal, Symbol, Symbol,
+    testutils::{Address as _, Events, Ledger},
+    token::StellarAssetClient,
+    Address, BytesN, Env, IntoVal, Symbol,
 };
 
-use boxmeout::helpers::*;
 use boxmeout::{AMMClient, AMM};
 
 const POOL_YES_RESERVE: &str = "pool_yes_reserve";
 const POOL_NO_RESERVE: &str = "pool_no_reserve";
 const POOL_K: &str = "pool_k";
 const POOL_EXISTS: &str = "pool_exists";
-const USER_SHARES_YES: &str = "user_shares_yes";
-const USER_SHARES_NO: &str = "user_shares_no";
-use boxmeout::{AMMContract, AMMContractClient};
+const USER_SHARES_KEY: &str = "user_shares";
 
 fn create_test_env() -> Env {
     Env::default()
@@ -81,19 +77,12 @@ fn get_user_shares_from_storage(
     outcome: u32,
 ) -> u128 {
     env.as_contract(amm_id, || {
-        let key = if outcome == 1 {
-            (
-                Symbol::new(env, USER_SHARES_YES),
-                user.clone(),
-                market_id.clone(),
-            )
-        } else {
-            (
-                Symbol::new(env, USER_SHARES_NO),
-                user.clone(),
-                market_id.clone(),
-            )
-        };
+        let key = (
+            Symbol::new(env, USER_SHARES_KEY),
+            market_id.clone(),
+            user.clone(),
+            outcome,
+        );
         env.storage().persistent().get(&key).unwrap_or(0)
     })
 }

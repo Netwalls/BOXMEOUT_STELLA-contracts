@@ -12,8 +12,8 @@ mod amm;
 pub use amm::*;
 
 // FACTORY CONTRACT
-// mod factory;
-// pub use factory::*;
+mod factory;
+pub use factory::*;
 
 // MARKET CONTRACT (for prediction market logic)
 mod market;
