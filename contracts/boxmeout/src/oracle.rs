@@ -1,3 +1,4 @@
+
 // contract/src/oracle.rs - Oracle & Market Resolution Contract Implementation
 // Handles multi-source oracle consensus for market resolution
 
@@ -478,9 +479,9 @@ impl OracleManager {
     pub fn emergency_override(
         env: Env,
         admin: Address,
-        market_id: BytesN<32>,
-        forced_outcome: u32,
-        reason: Symbol,
+        _market_id: BytesN<32>,
+        _forced_outcome: u32,
+        _reason: Symbol,
     ) {
         todo!("See emergency override TODO above")
     }

@@ -1,7 +1,7 @@
 // contract/src/factory.rs - Market Factory Contract Implementation
 // Handles market creation and lifecycle management
 
-use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, IntoVal, Symbol, Vec};
 
 // Storage keys
 const ADMIN_KEY: &str = "admin";
@@ -138,9 +138,13 @@ impl MarketFactory {
             .get(&Symbol::new(&env, TREASURY_KEY))
             .expect("Treasury address not set");
 
-        // Route fee to treasury
-        let treasury_client = crate::treasury::TreasuryClient::new(&env, &treasury_address);
-        treasury_client.deposit_fees(&creator, &creation_fee);
+        // Cross-contract call to Treasury using contract address
+        // This works because we're calling by address at runtime, not compile-time module reference
+        env.invoke_contract::<()>(
+            &treasury_address,
+            &Symbol::new(&env, "deposit_fees"),
+            (creator.clone(), creation_fee).into_val(&env),
+        );
 
         // Emit MarketCreated event
         env.events().publish(

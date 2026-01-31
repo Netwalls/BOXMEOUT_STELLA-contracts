@@ -11,10 +11,11 @@ const TRADE_COUNT: &str = "trade_count";
 const USER_SHARES_YES: &str = "user_shares_yes";
 const USER_SHARES_NO: &str = "user_shares_no";
 
+/// Create test environment (test-only utility)
+/// Note: Call env.mock_all_auths() manually in your tests after creating the env
+#[cfg(test)]
 pub fn create_test_env() -> Env {
-    let env = Env::default();
-    env.mock_all_auths();
-    env
+    Env::default()
 }
 
 /// Get pool reserves for a market
