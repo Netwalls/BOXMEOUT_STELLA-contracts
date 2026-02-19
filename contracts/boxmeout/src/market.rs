@@ -1319,4 +1319,143 @@ mod tests {
 
         market_client.resolve_market(&market_id_bytes);
     }
+
+    // ============================================================================
+    // GET USER PREDICTION TESTS
+    // ============================================================================
+
+    #[test]
+    fn test_get_user_prediction_no_prediction_returns_none() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+        let oracle_contract_id = env.register(MockOracle, ());
+        let token_admin = Address::generate(&env);
+        let usdc_client = create_token_contract(&env, &token_admin);
+
+        market_client.initialize(
+            &market_id_bytes,
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &usdc_client.address,
+            &oracle_contract_id,
+            &2000,
+            &3000,
+        );
+
+        let user = Address::generate(&env);
+        let result = market_client.get_user_prediction(&user, &market_id_bytes);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_user_prediction_committed_returns_commitment_data() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+        let oracle_contract_id = env.register(MockOracle, ());
+        let token_admin = Address::generate(&env);
+        let usdc_client = create_token_contract(&env, &token_admin);
+
+        market_client.initialize(
+            &market_id_bytes,
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &usdc_client.address,
+            &oracle_contract_id,
+            &2000,
+            &3000,
+        );
+
+        let user = Address::generate(&env);
+        let amount = 100_000_000i128;
+        let commit_hash = BytesN::from_array(&env, &[5u8; 32]);
+
+        usdc_client.mint(&user, &amount);
+        usdc_client.approve(&user, &market_contract_id, &amount, &100);
+        market_client.commit_prediction(&user, &commit_hash, &amount);
+
+        let result = market_client.get_user_prediction(&user, &market_id_bytes);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.commitment_hash, commit_hash);
+        assert_eq!(r.amount, amount);
+        assert_eq!(r.status, PREDICTION_STATUS_COMMITTED);
+        assert_eq!(r.predicted_outcome, PREDICTION_OUTCOME_NONE);
+    }
+
+    #[test]
+    fn test_get_user_prediction_revealed_returns_prediction_data() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+        let oracle_contract_id = env.register(MockOracle, ());
+        let token_admin = Address::generate(&env);
+        let usdc_client = create_token_contract(&env, &token_admin);
+
+        market_client.initialize(
+            &market_id_bytes,
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &usdc_client.address,
+            &oracle_contract_id,
+            &2000,
+            &3000,
+        );
+
+        let user = Address::generate(&env);
+        let amount = 500_000_000i128;
+        let outcome = 1u32; // YES
+
+        market_client.test_set_prediction(&user, outcome, amount);
+
+        let result = market_client.get_user_prediction(&user, &market_id_bytes);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.commitment_hash, BytesN::from_array(&env, &[0u8; 32]));
+        assert_eq!(r.amount, amount);
+        assert_eq!(r.status, PREDICTION_STATUS_REVEALED);
+        assert_eq!(r.predicted_outcome, outcome);
+    }
+
+    #[test]
+    fn test_get_user_prediction_revealed_no_outcome() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+        let oracle_contract_id = env.register(MockOracle, ());
+        let token_admin = Address::generate(&env);
+        let usdc_client = create_token_contract(&env, &token_admin);
+
+        market_client.initialize(
+            &market_id_bytes,
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &usdc_client.address,
+            &oracle_contract_id,
+            &2000,
+            &3000,
+        );
+
+        let user = Address::generate(&env);
+        market_client.test_set_prediction(&user, 0u32, 200); // NO outcome
+
+        let result = market_client.get_user_prediction(&user, &market_id_bytes);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.predicted_outcome, 0);
+        assert_eq!(r.amount, 200);
+    }
 }
