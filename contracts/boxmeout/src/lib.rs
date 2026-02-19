@@ -3,24 +3,58 @@
 
 #![no_std]
 
-// Module declarations for modular contract architecture
-// NOTE: Only one contract can be compiled at a time for WASM
-// To build different contracts, comment/uncomment the appropriate module
+// ============================================================================
+// CONTRACT MODULES - Conditionally compiled based on features
+// ============================================================================
+// Only ONE contract module is compiled per build using Cargo features.
+// This prevents "duplicate symbol" errors since each contract has initialize().
+//
+// Build commands:
+//   cargo build --target wasm32-unknown-unknown --release --features market
+//   cargo build --target wasm32-unknown-unknown --release --features oracle
+//   cargo build --target wasm32-unknown-unknown --release --features amm
+//   cargo build --target wasm32-unknown-unknown --release --features factory
+//   cargo build --target wasm32-unknown-unknown --release --features treasury
 
-// AMM CONTRACT (currently active for get_odds implementation)
+#[cfg(feature = "amm")]
 mod amm;
+
+#[cfg(feature = "factory")]
+mod factory;
+
+#[cfg(feature = "market")]
+mod market;
+
+#[cfg(feature = "treasury")]
+mod treasury;
+
+#[cfg(feature = "oracle")]
+mod oracle;
+
+// Helper modules - Always included for utility functions
+mod helpers;
+
+// ============================================================================
+// CONDITIONAL EXPORTS - Export the contract being built
+// ============================================================================
+
+#[cfg(feature = "market")]
+pub use market::*;
+
+#[cfg(feature = "oracle")]
+pub use oracle::*;
+
+#[cfg(feature = "amm")]
 pub use amm::*;
 
-// FACTORY CONTRACT
-// mod factory;
-// pub use factory::*;
+#[cfg(feature = "factory")]
+pub use factory::*;
 
-// Uncomment below to build other contracts:
-// mod market;
-// pub use market::*;
+#[cfg(feature = "treasury")]
+pub use treasury::*;
 
-// mod treasury;
-// pub use treasury::*;
-
-// mod oracle;
-// pub use oracle::*;
+// ============================================================================
+// TESTS
+// ============================================================================
+// Note: Integration tests are in the tests/ directory and are compiled
+// separately as their own crates. They do NOT need to be declared here.
