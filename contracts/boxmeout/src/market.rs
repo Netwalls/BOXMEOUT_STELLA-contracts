@@ -1416,7 +1416,7 @@ mod tests {
         let amount = 500_000_000i128;
         let outcome = 1u32; // YES
 
-        market_client.test_set_prediction(&user, outcome, amount);
+        market_client.test_set_prediction(&user, &outcome, &amount);
 
         let result = market_client.get_user_prediction(&user, &market_id_bytes);
         assert!(result.is_some());
@@ -1450,7 +1450,7 @@ mod tests {
         );
 
         let user = Address::generate(&env);
-        market_client.test_set_prediction(&user, 0u32, 200); // NO outcome
+        market_client.test_set_prediction(&user, &0u32, &200i128); // NO outcome
 
         let result = market_client.get_user_prediction(&user, &market_id_bytes);
         assert!(result.is_some());
