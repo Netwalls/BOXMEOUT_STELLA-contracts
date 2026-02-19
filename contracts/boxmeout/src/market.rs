@@ -77,6 +77,27 @@ pub struct UserPrediction {
     pub timestamp: u64,
 }
 
+/// Status for user prediction query
+pub const PREDICTION_STATUS_COMMITTED: u32 = 0;
+pub const PREDICTION_STATUS_REVEALED: u32 = 1;
+
+/// Sentinel for predicted_outcome when not yet revealed
+pub const PREDICTION_OUTCOME_NONE: u32 = 2;
+
+/// Result of get_user_prediction query - frontend user position
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UserPredictionResult {
+    /// Commitment hash (zeros when revealed; commitment is removed)
+    pub commitment_hash: BytesN<32>,
+    /// Amount committed/revealed
+    pub amount: i128,
+    /// PREDICTION_STATUS_COMMITTED or PREDICTION_STATUS_REVEALED
+    pub status: u32,
+    /// 0=NO, 1=YES when revealed; PREDICTION_OUTCOME_NONE when committed
+    pub predicted_outcome: u32,
+}
+
 /// PREDICTION MARKET - Manages individual market logic
 #[contract]
 pub struct PredictionMarket;
@@ -676,14 +697,36 @@ impl PredictionMarket {
 
     /// Get prediction records for a user in this market
     ///
-    /// TODO: Get User Prediction
-    /// - Query user_predictions map by user + market_id
-    /// - Return prediction data: outcome, amount, committed, revealed, claimed
-    /// - Include: commit timestamp, reveal timestamp, claim timestamp
-    /// - Include potential payout if market is unresolved
-    /// - Handle: user has no prediction (return error)
-    pub fn get_user_prediction(env: Env, user: Address, market_id: BytesN<32>) -> Symbol {
-        todo!("See get user prediction TODO above")
+    /// Returns commitment_hash, amount, status, predicted_outcome (if revealed).
+    /// Returns None if user has no commitment and no prediction.
+    pub fn get_user_prediction(
+        env: Env,
+        user: Address,
+        _market_id: BytesN<32>,
+    ) -> Option<UserPredictionResult> {
+        // Check commitment first (unrevealed)
+        let commit_key = Self::get_commit_key(&env, &user);
+        if let Some(commitment) = env.storage().persistent().get::<_, Commitment>(&commit_key) {
+            return Some(UserPredictionResult {
+                commitment_hash: commitment.commit_hash,
+                amount: commitment.amount,
+                status: PREDICTION_STATUS_COMMITTED,
+                predicted_outcome: PREDICTION_OUTCOME_NONE,
+            });
+        }
+
+        // Check revealed prediction
+        let pred_key = (Symbol::new(&env, PREDICTION_PREFIX), user);
+        if let Some(pred) = env.storage().persistent().get::<_, UserPrediction>(&pred_key) {
+            return Some(UserPredictionResult {
+                commitment_hash: BytesN::from_array(&env, &[0u8; 32]),
+                amount: pred.amount,
+                status: PREDICTION_STATUS_REVEALED,
+                predicted_outcome: pred.outcome,
+            });
+        }
+
+        None
     }
 
     /// Get all predictions in market (for governance/audits)
