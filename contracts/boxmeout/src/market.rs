@@ -1,16 +1,9 @@
-<<<<<<< HEAD
-// contracts/market.rs - Individual Prediction Market Contract
-// Handles predictions, bet commitment/reveal, market resolution
-
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Map, Symbol, Vec};
-=======
 // Individual Prediction Market Contract - This handles predictions, bet commitment/reveal, market resolution
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Map, Symbol,
     Vec,
 };
->>>>>>> 0d438863f72917744879ae34526e16a766719043
 
 // Storage keys
 const MARKET_ID_KEY: &str = "market_id";
@@ -23,19 +16,14 @@ const MARKET_STATE_KEY: &str = "market_state";
 const YES_POOL_KEY: &str = "yes_pool";
 const NO_POOL_KEY: &str = "no_pool";
 const TOTAL_VOLUME_KEY: &str = "total_volume";
-<<<<<<< HEAD
-=======
 const PENDING_COUNT_KEY: &str = "pending_count";
 const COMMIT_PREFIX: &str = "commit";
->>>>>>> 0d438863f72917744879ae34526e16a766719043
 
 /// Market states
 const STATE_OPEN: u32 = 0;
 const STATE_CLOSED: u32 = 1;
 const STATE_RESOLVED: u32 = 2;
 
-<<<<<<< HEAD
-=======
 /// Error codes following Soroban best practices
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -65,7 +53,6 @@ pub struct Commitment {
     pub timestamp: u64,
 }
 
->>>>>>> 0d438863f72917744879ae34526e16a766719043
 /// PREDICTION MARKET - Manages individual market logic
 #[contract]
 pub struct PredictionMarket;
@@ -95,11 +82,7 @@ impl PredictionMarket {
             .persistent()
             .set(&Symbol::new(&env, CREATOR_KEY), &creator);
 
-<<<<<<< HEAD
-        // Store factory address (parent contract)
-=======
         // Store factory address
->>>>>>> 0d438863f72917744879ae34526e16a766719043
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, FACTORY_KEY), &factory);
@@ -118,11 +101,7 @@ impl PredictionMarket {
             .persistent()
             .set(&Symbol::new(&env, RESOLUTION_TIME_KEY), &resolution_time);
 
-<<<<<<< HEAD
-        // Initialize market state as OPEN
-=======
         // Initialize market state as open
->>>>>>> 0d438863f72917744879ae34526e16a766719043
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_OPEN);
@@ -141,14 +120,11 @@ impl PredictionMarket {
             .persistent()
             .set(&Symbol::new(&env, TOTAL_VOLUME_KEY), &0i128);
 
-<<<<<<< HEAD
-=======
         // Initialize pending count
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, PENDING_COUNT_KEY), &0u32);
 
->>>>>>> 0d438863f72917744879ae34526e16a766719043
         // Emit initialization event
         env.events().publish(
             (Symbol::new(&env, "market_initialized"),),
@@ -156,32 +132,6 @@ impl PredictionMarket {
         );
     }
 
-<<<<<<< HEAD
-    /// Phase 1: User commits to a prediction (commit-reveal scheme for privacy)
-    ///
-    /// TODO: Commit Prediction
-    /// - Require user authentication
-    /// - Validate market is in OPEN state
-    /// - Validate current timestamp < closing_time
-    /// - Validate amount > 0 and <= user's balance
-    /// - Validate commit_hash is valid 32-byte hash
-    /// - Create commit hash as: keccak256(user_address + outcome + amount + salt)
-    /// - Transfer amount from user to market escrow
-    /// - Handle USDC transfer failure: revert
-    /// - Store commit record: { user, commit_hash, amount, timestamp }
-    /// - Prevent user from committing twice (check existing commits)
-    /// - Record user in active_predictors list
-    /// - Emit CommitmentMade(user, market_id, commit_hash, amount, timestamp)
-    /// - Update market metadata (pending_predictions count)
-    pub fn commit_prediction(
-        env: Env,
-        user: Address,
-        market_id: BytesN<32>,
-        commit_hash: BytesN<32>,
-        amount: i128,
-    ) {
-        todo!("See commit prediction TODO above")
-=======
     pub fn commit_prediction(
         env: Env,
         user: Address,
@@ -301,7 +251,6 @@ impl PredictionMarket {
         env.storage()
             .persistent()
             .get(&Symbol::new(&env, MARKET_STATE_KEY))
->>>>>>> 0d438863f72917744879ae34526e16a766719043
     }
 
     /// Phase 2: User reveals their committed prediction
@@ -362,15 +311,7 @@ impl PredictionMarket {
     /// - Mark market as settled
     /// - Emit MarketResolved(market_id, winning_outcome, total_winners, timestamp)
     /// - Prepare treasury transfers for fee collection
-<<<<<<< HEAD
-    pub fn resolve_market(
-        env: Env,
-        market_id: BytesN<32>,
-        winning_outcome: u32,
-    ) {
-=======
     pub fn resolve_market(env: Env, market_id: BytesN<32>, winning_outcome: u32) {
->>>>>>> 0d438863f72917744879ae34526e16a766719043
         todo!("See resolve market TODO above")
     }
 
@@ -386,16 +327,7 @@ impl PredictionMarket {
     /// - Increment dispute counter
     /// - Emit MarketDisputed(user, reason, market_id, timestamp)
     /// - Notify admin of dispute
-<<<<<<< HEAD
-    pub fn dispute_market(
-        env: Env,
-        user: Address,
-        market_id: BytesN<32>,
-        dispute_reason: Symbol,
-    ) {
-=======
     pub fn dispute_market(env: Env, user: Address, market_id: BytesN<32>, dispute_reason: Symbol) {
->>>>>>> 0d438863f72917744879ae34526e16a766719043
         todo!("See dispute market TODO above")
     }
 
@@ -431,15 +363,7 @@ impl PredictionMarket {
     /// - Transfer refund from treasury to user
     /// - Mark as refunded
     /// - Emit LosingBetRefunded(user, market_id, refund_amount, timestamp)
-<<<<<<< HEAD
-    pub fn refund_losing_bet(
-        env: Env,
-        user: Address,
-        market_id: BytesN<32>,
-    ) -> i128 {
-=======
     pub fn refund_losing_bet(env: Env, user: Address, market_id: BytesN<32>) -> i128 {
->>>>>>> 0d438863f72917744879ae34526e16a766719043
         todo!("See refund losing bet TODO above")
     }
 
@@ -466,15 +390,7 @@ impl PredictionMarket {
     /// - Include: commit timestamp, reveal timestamp, claim timestamp
     /// - Include potential payout if market is unresolved
     /// - Handle: user has no prediction (return error)
-<<<<<<< HEAD
-    pub fn get_user_prediction(
-        env: Env,
-        user: Address,
-        market_id: BytesN<32>,
-    ) -> Symbol {
-=======
     pub fn get_user_prediction(env: Env, user: Address, market_id: BytesN<32>) -> Symbol {
->>>>>>> 0d438863f72917744879ae34526e16a766719043
         todo!("See get user prediction TODO above")
     }
 
@@ -502,15 +418,90 @@ impl PredictionMarket {
         todo!("See get market leaderboard TODO above")
     }
 
-    /// Get total volume and liquidity for market
-    ///
-    /// TODO: Get Market Liquidity
-    /// - Query yes_pool, no_pool, total_volume
-    /// - Calculate current odds for YES and NO
-    /// - Return depth: how much can be bought at current price
-    /// - Include slippage estimates for trades
-    pub fn get_market_liquidity(env: Env, market_id: BytesN<32>) -> i128 {
-        todo!("See get market liquidity TODO above")
+    /// Query current YES/NO liquidity from AMM pool
+    /// Returns: (yes_reserve, no_reserve, k_constant, yes_odds, no_odds)
+    /// - yes_reserve: Current YES token reserve in the pool
+    /// - no_reserve: Current NO token reserve in the pool  
+    /// - k_constant: CPMM invariant (yes_reserve * no_reserve)
+    /// - yes_odds: Implied probability for YES outcome (basis points, 5000 = 50%)
+    /// - no_odds: Implied probability for NO outcome (basis points, 5000 = 50%)
+    pub fn get_market_liquidity(env: Env, market_id: BytesN<32>) -> (u128, u128, u128, u32, u32) {
+        // Get AMM contract address from factory
+        let factory: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, FACTORY_KEY))
+            .unwrap_or_else(|| panic!("factory not initialized"));
+
+        // Query pool state from AMM
+        // AMM's get_pool_state returns: (yes_reserve, no_reserve, total_liquidity, yes_odds, no_odds)
+        let pool_state = Self::query_amm_pool_state(env.clone(), factory, market_id.clone());
+        
+        let yes_reserve = pool_state.0;
+        let no_reserve = pool_state.1;
+        let yes_odds = pool_state.3;
+        let no_odds = pool_state.4;
+
+        // Calculate k constant (CPMM invariant: x * y = k)
+        let k_constant = yes_reserve * no_reserve;
+
+        // Return: (yes_reserve, no_reserve, k_constant, yes_odds, no_odds)
+        (yes_reserve, no_reserve, k_constant, yes_odds, no_odds)
+    }
+
+    /// Helper function to query AMM pool state
+    /// This would typically use cross-contract calls in production
+    /// For now, returns mock data structure matching AMM interface
+    fn query_amm_pool_state(
+        env: Env,
+        _factory: Address,
+        _market_id: BytesN<32>,
+    ) -> (u128, u128, u128, u32, u32) {
+        // In production, this would be a cross-contract call to AMM:
+        // let amm_client = AMMClient::new(&env, &amm_address);
+        // amm_client.get_pool_state(&market_id)
+        
+        // For now, read from local storage (assuming AMM data is synced)
+        let yes_reserve: u128 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, YES_POOL_KEY))
+            .unwrap_or(0);
+        
+        let no_reserve: u128 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, NO_POOL_KEY))
+            .unwrap_or(0);
+
+        let total_liquidity = yes_reserve + no_reserve;
+
+        // Calculate odds (same logic as AMM)
+        let (yes_odds, no_odds) = if total_liquidity == 0 {
+            (5000, 5000) // 50/50 if no liquidity
+        } else if yes_reserve == 0 {
+            (0, 10000)
+        } else if no_reserve == 0 {
+            (10000, 0)
+        } else {
+            let yes_odds = ((no_reserve * 10000) / total_liquidity) as u32;
+            let no_odds = ((yes_reserve * 10000) / total_liquidity) as u32;
+            
+            // Ensure odds sum to 10000
+            let total_odds = yes_odds + no_odds;
+            if total_odds != 10000 {
+                let adjustment = 10000 - total_odds;
+                if yes_odds >= no_odds {
+                    (yes_odds + adjustment, no_odds)
+                } else {
+                    (yes_odds, no_odds + adjustment)
+                }
+            } else {
+                (yes_odds, no_odds)
+            }
+        };
+
+        (yes_reserve, no_reserve, total_liquidity, yes_odds, no_odds)
     }
 
     /// Emergency function: Market creator can cancel unresolved market
