@@ -414,20 +414,6 @@ impl OracleManager {
         );
     }
 
-    /// TODO: Finalize Resolution
-    /// - Validate market_id exists
-    /// - Validate consensus already reached
-    /// - Validate time_delay_before_finality has passed
-    /// - Validate no active disputes/challenges
-    /// - Get consensus_result
-    /// - Call market contract's resolve_market() function
-    /// - Pass winning_outcome to market
-    /// - Confirm resolution recorded
-    /// - Emit ResolutionFinalized(market_id, outcome, timestamp)
-    pub fn finalize_resolution(_env: Env, _market_id: BytesN<32>) {
-        todo!("See finalize resolution TODO above")
-    }
-
     /// Challenge an attestation (dispute oracle honesty)
     ///
     /// Allows users to challenge attestations with stake.
@@ -545,7 +531,7 @@ impl OracleManager {
             // Challenge is valid - oracle was dishonest
 
             // 6a. Reduce oracle's reputation/accuracy score (reduce by 20%)
-            accuracy = if accuracy >= 20 { accuracy - 20 } else { 0 };
+            accuracy = accuracy.saturating_sub(20);
             new_reputation = accuracy;
 
             // 6b. Slash oracle's stake (50% of stake)
