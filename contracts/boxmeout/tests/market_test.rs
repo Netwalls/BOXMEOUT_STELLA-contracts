@@ -1100,5 +1100,3 @@ fn test_get_market_liquidity_multiple_queries_consistent() {
     assert_eq!(result1, result2);
     assert_eq!(result2, result3);
 }
-=======
->>>>>>> origin/main
