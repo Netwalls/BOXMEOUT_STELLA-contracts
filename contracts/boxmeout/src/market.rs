@@ -976,7 +976,11 @@ impl PredictionMarket {
     ///
     /// # Panics
     /// * If market is not in RESOLVED state
-    pub fn get_market_leaderboard(env: Env, _market_id: BytesN<32>, limit: u32) -> Vec<(Address, i128)> {
+    pub fn get_market_leaderboard(
+        env: Env,
+        _market_id: BytesN<32>,
+        limit: u32,
+    ) -> Vec<(Address, i128)> {
         // 1. Validate market state is RESOLVED
         let state: u32 = env
             .storage()
@@ -1023,16 +1027,16 @@ impl PredictionMarket {
         // Note: This implementation uses a test helper approach
         // In production, you would maintain a list of all participants during prediction phase
         let mut winners: Vec<(Address, i128)> = Vec::new(&env);
-        
+
         // Since Soroban doesn't provide iteration over storage keys,
         // we rely on the test infrastructure to set up predictions
         // The actual collection would happen through a maintained participant list
-        
+
         // For each participant (in production, iterate through stored participant list):
         // - Check if they have a prediction
         // - If prediction.outcome == winning_outcome, calculate payout
         // - Add to winners vector
-        
+
         // This is intentionally left as a framework that works with test helpers
         // Production implementation would require maintaining a participants list
 
@@ -1044,7 +1048,7 @@ impl PredictionMarket {
                 for j in 0..(len - i - 1) {
                     let current = winners.get(j).unwrap();
                     let next = winners.get(j + 1).unwrap();
-                    
+
                     // Sort by payout descending
                     if current.1 < next.1 {
                         let temp = current.clone();
@@ -1058,7 +1062,7 @@ impl PredictionMarket {
         // 7. Return top N winners
         let result_len = if limit < len { limit } else { len };
         let mut result: Vec<(Address, i128)> = Vec::new(&env);
-        
+
         for i in 0..result_len {
             result.push_back(winners.get(i).unwrap());
         }
@@ -1346,12 +1350,16 @@ impl PredictionMarket {
 
         // Collect winners from provided user list
         let mut winners: Vec<(Address, i128)> = Vec::new(&env);
-        
+
         for i in 0..users.len() {
             let user = users.get(i).unwrap();
             let prediction_key = (Symbol::new(&env, PREDICTION_PREFIX), user.clone());
-            
-            if let Some(prediction) = env.storage().persistent().get::<_, UserPrediction>(&prediction_key) {
+
+            if let Some(prediction) = env
+                .storage()
+                .persistent()
+                .get::<_, UserPrediction>(&prediction_key)
+            {
                 if prediction.outcome == winning_outcome {
                     let gross_payout = prediction
                         .amount
@@ -1373,7 +1381,7 @@ impl PredictionMarket {
                 for j in 0..(len - i - 1) {
                     let current = winners.get(j).unwrap();
                     let next = winners.get(j + 1).unwrap();
-                    
+
                     if current.1 < next.1 {
                         let temp = current.clone();
                         winners.set(j, next);
@@ -1386,7 +1394,7 @@ impl PredictionMarket {
         // Return top N
         let result_len = if limit < len { limit } else { len };
         let mut result: Vec<(Address, i128)> = Vec::new(&env);
-        
+
         for i in 0..result_len {
             result.push_back(winners.get(i).unwrap());
         }
@@ -2122,10 +2130,11 @@ mod market_leaderboard_tests {
         users.push_back(user2.clone());
         users.push_back(user3.clone());
 
-        let winners = market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &10, &users);
+        let winners =
+            market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &10, &users);
 
         assert_eq!(winners.len(), 3);
-        
+
         // Verify sorted by payout descending
         let winner1 = winners.get(0).unwrap();
         let winner2 = winners.get(1).unwrap();
@@ -2178,10 +2187,11 @@ mod market_leaderboard_tests {
         users.push_back(user3.clone());
 
         // Request only top 2
-        let winners = market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &2, &users);
+        let winners =
+            market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &2, &users);
 
         assert_eq!(winners.len(), 2);
-        
+
         let winner1 = winners.get(0).unwrap();
         let winner2 = winners.get(1).unwrap();
 
@@ -2217,7 +2227,8 @@ mod market_leaderboard_tests {
         market_client.test_setup_resolution(&market_id_bytes, &1u32, &1000, &500);
 
         let users = Vec::new(&env);
-        let winners = market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &0, &users);
+        let winners =
+            market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &0, &users);
 
         assert_eq!(winners.len(), 0);
     }
@@ -2249,7 +2260,8 @@ mod market_leaderboard_tests {
         market_client.test_setup_resolution(&market_id_bytes, &1u32, &0, &1000);
 
         let users = Vec::new(&env);
-        let winners = market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &10, &users);
+        let winners =
+            market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &10, &users);
 
         assert_eq!(winners.len(), 0);
     }
@@ -2322,11 +2334,12 @@ mod market_leaderboard_tests {
         users.push_back(loser1.clone());
         users.push_back(winner2.clone());
 
-        let winners = market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &10, &users);
+        let winners =
+            market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &10, &users);
 
         // Should only return 2 winners (loser filtered out)
         assert_eq!(winners.len(), 2);
-        
+
         let w1 = winners.get(0).unwrap();
         let w2 = winners.get(1).unwrap();
 
@@ -2373,10 +2386,11 @@ mod market_leaderboard_tests {
         users.push_back(user2.clone());
         users.push_back(user3.clone());
 
-        let winners = market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &10, &users);
+        let winners =
+            market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &10, &users);
 
         assert_eq!(winners.len(), 3);
-        
+
         // First two should have same payout (tie)
         let w1 = winners.get(0).unwrap();
         let w2 = winners.get(1).unwrap();
@@ -2425,7 +2439,8 @@ mod market_leaderboard_tests {
         users.push_back(user2.clone());
 
         // Request 100 but only 2 winners exist
-        let winners = market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &100, &users);
+        let winners =
+            market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &100, &users);
 
         assert_eq!(winners.len(), 2);
     }
