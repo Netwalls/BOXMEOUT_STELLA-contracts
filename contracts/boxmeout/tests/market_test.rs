@@ -1,9 +1,6 @@
 #![cfg(test)]
 
-use boxmeout::market::{
-    Commitment, MarketError, MarketState, PredictionMarket, PredictionMarketClient,
-};
-use boxmeout::market::{MarketError, PredictionMarketClient};
+use boxmeout::market::{MarketError, MarketState, PredictionMarketClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
     token, Address, BytesN, Env, Symbol,
@@ -63,9 +60,9 @@ fn setup_test_market(
     let market_id = BytesN::from_array(env, &[1u8; 32]);
     let creator = Address::generate(env);
     let factory = Address::generate(env);
-    let _admin = Address::generate(env);
+    let admin = Address::generate(env);
 
-    let (_token, usdc_address) = create_usdc_token(env, &_admin);
+    let (_token, usdc_address) = create_usdc_token(env, &admin);
 
     let closing_time = env.ledger().timestamp() + 86400; // 24 hours from now
     let resolution_time = closing_time + 3600; // 1 hour after closing
@@ -92,7 +89,7 @@ fn setup_test_market(
         admin,
         usdc_address,
         market_contract,
-    )(client, market_id, creator, _admin, usdc_address)
+    )
 }
 
 /// Helper to setup market with token for claim tests
@@ -161,7 +158,6 @@ fn test_commit_prediction_happy_path() {
     let env = create_test_env();
     let (client, _market_id, _creator, admin, usdc_address, _market_contract) =
         setup_test_market(&env);
-    let (client, _market_id, _creator, _admin, usdc_address) = setup_test_market(&env);
 
     // Setup user with USDC balance
     let user = Address::generate(&env);
@@ -211,8 +207,6 @@ fn test_commit_prediction_duplicate_rejected() {
     let env = create_test_env();
     let (client, _market_id, _creator, admin, usdc_address, _market_contract) =
         setup_test_market(&env);
-
-    let (client, _market_id, _creator, _admin, usdc_address) = setup_test_market(&env);
 
     let user = Address::generate(&env);
     let amount = 100_000_000i128;
@@ -279,7 +273,6 @@ fn test_multiple_users_commit() {
     let env = create_test_env();
     let (client, _market_id, _creator, admin, usdc_address, _market_contract) =
         setup_test_market(&env);
-    let (client, _market_id, _creator, _admin, usdc_address) = setup_test_market(&env);
 
     let token = token::StellarAssetClient::new(&env, &usdc_address);
     let market_address = client.address.clone();
