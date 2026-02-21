@@ -34,6 +34,8 @@ pub struct Pool {
 #[contract]
 pub struct AMM;
 
+/// Soroban contract type for AMM
+pub type AMMContract = AMM;
 #[contractimpl]
 impl AMM {
     /// Initialize AMM with liquidity pools

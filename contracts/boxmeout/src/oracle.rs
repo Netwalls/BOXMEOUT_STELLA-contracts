@@ -375,7 +375,7 @@ impl OracleManager {
     /// Called after consensus reached and dispute period elapsed.
     /// Makes cross-contract call to Market.resolve_market().
     /// Locks in final outcome permanently.
-    pub fn finalize_resolution(env: Env, market_id: BytesN<32>, market_address: Address) {
+    pub fn finalize_resolution(env: Env, market_id: BytesN<32>, _market_address: Address) {
         // 1. Validate market is registered
         let market_key = (Symbol::new(&env, MARKET_RES_TIME_KEY), market_id.clone());
         let resolution_time: u64 = env
@@ -403,9 +403,12 @@ impl OracleManager {
         env.storage().persistent().set(&result_key, &final_outcome);
 
         // 5. Cross-contract call to Market.resolve_market()
-        use crate::market::PredictionMarketClient;
-        let market_client = PredictionMarketClient::new(&env, &market_address);
-        market_client.resolve_market(&market_id);
+        #[cfg(feature = "market")]
+        {
+            use crate::market::PredictionMarketClient;
+            let market_client = PredictionMarketClient::new(&env, &_market_address);
+            market_client.resolve_market(&market_id);
+        }
 
         // 6. Emit ResolutionFinalized event
         env.events().publish(
@@ -734,6 +737,7 @@ mod tests {
     use soroban_sdk::testutils::{Address as _, Ledger};
     use soroban_sdk::{Address, Env};
 
+    // Do NOT expose contractimpl or initialize here, only use OracleManagerClient
     fn setup_oracle(env: &Env) -> (OracleManagerClient<'_>, Address, Address, Address) {
         let admin = Address::generate(env);
         let oracle1 = Address::generate(env);
@@ -918,7 +922,7 @@ mod tests {
         oracle_client.submit_attestation(&oracle1, &market_id, &1, &data_hash);
 
         let initial_stake = oracle_client.get_oracle_stake(&oracle1);
-        let initial_accuracy = oracle_client.get_oracle_accuracy(&oracle1);
+        let _initial_accuracy = oracle_client.get_oracle_accuracy(&oracle1);
 
         let challenger = Address::generate(&env);
         let reason = Symbol::new(&env, "fraud");
