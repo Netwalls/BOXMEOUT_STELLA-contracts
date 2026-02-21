@@ -3,7 +3,7 @@
 use boxmeout::market::{MarketError, PredictionMarketClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
-    token, Address, BytesN, Env,
+    token, Address, BytesN, Env, Symbol,
 };
 
 // ...rest of the file...
@@ -57,11 +57,11 @@ fn setup_test_market(
     let client = PredictionMarketClient::new(env, &market_contract);
 
     let market_id = BytesN::from_array(env, &[1u8; 32]);
-    let _creator = Address::generate(env);
+    let creator = Address::generate(env);
     let factory = Address::generate(env);
     let _admin = Address::generate(env);
 
-    let (_token, usdc_address) = create_usdc_token(env, &admin);
+    let (_token, usdc_address) = create_usdc_token(env, &_admin);
 
     let closing_time = env.ledger().timestamp() + 86400; // 24 hours from now
     let resolution_time = closing_time + 3600; // 1 hour after closing
@@ -81,7 +81,7 @@ fn setup_test_market(
         &resolution_time,
     );
 
-    (client, market_id, creator, admin, usdc_address)
+    (client, market_id, creator, _admin, usdc_address)
 }
 
 /// Helper to setup market with token for claim tests
@@ -97,8 +97,8 @@ fn setup_market_for_claims(
     let client = PredictionMarketClient::new(env, &market_contract);
 
     let market_id = BytesN::from_array(env, &[1u8; 32]);
-    let _creator = Address::generate(env);
-    let _admin = Address::generate(env);
+    let creator = Address::generate(env);
+    let admin = Address::generate(env);
 
     let (token_client, usdc_address) = create_usdc_token(env, &admin);
 
@@ -147,7 +147,7 @@ fn test_market_initialize() {
 #[test]
 fn test_commit_prediction_happy_path() {
     let env = create_test_env();
-    let (client, _market_id, _creator, admin, usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, _admin, usdc_address) = setup_test_market(&env);
 
     // Setup user with USDC balance
     let user = Address::generate(&env);
@@ -195,7 +195,7 @@ fn test_commit_prediction_happy_path() {
 #[test]
 fn test_commit_prediction_duplicate_rejected() {
     let env = create_test_env();
-    let (client, _market_id, _creator, admin, usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, _admin, usdc_address) = setup_test_market(&env);
 
     let user = Address::generate(&env);
     let amount = 100_000_000i128;
@@ -258,14 +258,14 @@ fn test_commit_prediction_negative_amount_rejected() {
 #[test]
 fn test_multiple_users_commit() {
     let env = create_test_env();
-    let (client, _market_id, _creator, admin, usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, _admin, usdc_address) = setup_test_market(&env);
 
     let token = token::StellarAssetClient::new(&env, &usdc_address);
     let market_address = client.address.clone();
 
     // Setup three users
-    let _user1 = Address::generate(&env);
-    let _user2 = Address::generate(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
     let user3 = Address::generate(&env);
 
     let amount1 = 100_000_000i128;
@@ -444,8 +444,8 @@ fn test_multiple_winners_correct_proportional_payout() {
     let env = create_test_env();
     let (client, market_id, token_client, market_contract) = setup_market_for_claims(&env);
 
-    let _user1 = Address::generate(&env);
-    let _user2 = Address::generate(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
 
     // Total pool: 1000 (winners) + 1000 (losers) = 2000
     // User1 has 600, User2 has 400 of 1000 winner shares
@@ -614,8 +614,8 @@ fn test_all_winners_no_losers() {
     let env = create_test_env();
     let (client, market_id, token_client, market_contract) = setup_market_for_claims(&env);
 
-    let _user1 = Address::generate(&env);
-    let _user2 = Address::generate(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
 
     // Everyone bet on the winner, loser pool = 0
     token_client.mint(&market_contract, &1000);
@@ -649,6 +649,88 @@ fn test_single_winner_gets_all() {
     // Winner: (200 / 200) * 1000 = 1000, minus 10% = 900
     let payout = client.claim_winnings(&winner, &market_id);
     assert_eq!(payout, 900);
+}
+
+// ============================================================================
+// DISPUTE MARKET TESTS
+// ============================================================================
+
+#[test]
+fn test_dispute_market_happy_path() {
+    let env = create_test_env();
+    let (client, market_id, token_client, market_contract) = setup_market_for_claims(&env);
+
+    let user = Address::generate(&env);
+    let dispute_reason = Symbol::new(&env, "wrong");
+    let evidence_hash = Some(BytesN::from_array(&env, &[5u8; 32]));
+
+    // Mint USDC to user for dispute stake (1000)
+    token_client.mint(&user, &2000);
+    token_client.approve(
+        &user,
+        &market_contract,
+        &1000,
+        &(env.ledger().sequence() + 100),
+    );
+
+    // Resolve market
+    client.test_setup_resolution(&market_id, &1u32, &1000, &0);
+
+    // Initial state is 2 (RESOLVED)
+    assert_eq!(client.get_market_state_value().unwrap(), 2);
+
+    // Dispute
+    client.dispute_market(&user, &market_id, &dispute_reason, &evidence_hash);
+
+    // Verify state transitioned to DISPUTED (3)
+    let state = client.get_market_state_value().unwrap();
+    assert_eq!(state, 3);
+
+    // Verify stake was transferred
+    assert_eq!(token_client.balance(&user), 1000); // 2000 - 1000
+    assert_eq!(token_client.balance(&market_contract), 1000); // escrow received 1000
+}
+
+#[test]
+#[should_panic(expected = "Market not resolved")]
+fn test_dispute_market_not_resolved() {
+    let env = create_test_env();
+    let (client, market_id, _token_client, _market_contract) = setup_market_for_claims(&env);
+
+    let user = Address::generate(&env);
+    let dispute_reason = Symbol::new(&env, "wrong");
+
+    // Market is OPEN, not RESOLVED
+    client.dispute_market(&user, &market_id, &dispute_reason, &None);
+}
+
+#[test]
+#[should_panic(expected = "Dispute window has closed")]
+fn test_dispute_market_window_closed() {
+    let env = create_test_env();
+    let (client, market_id, token_client, market_contract) = setup_market_for_claims(&env);
+
+    let user = Address::generate(&env);
+    let dispute_reason = Symbol::new(&env, "wrong");
+
+    // Setup for stake
+    token_client.mint(&user, &2000);
+    token_client.approve(
+        &user,
+        &market_contract,
+        &1000,
+        &(env.ledger().sequence() + 100),
+    );
+
+    client.test_setup_resolution(&market_id, &1u32, &1000, &0);
+
+    // Advance time past 7-day window (resolution_time is 102345 initially based on setup)
+    // Add 604800 (7 days) + 1 second buffer
+    env.ledger().with_mut(|li| {
+        li.timestamp = 102345 + 604801;
+    });
+
+    client.dispute_market(&user, &market_id, &dispute_reason, &None);
 }
 
 // ============================================================================

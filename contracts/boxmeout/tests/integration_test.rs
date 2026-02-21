@@ -39,11 +39,11 @@ fn test_complete_prediction_flow() {
     let amm_client = AMMClient::new(&env, &amm_id);
 
     // Create addresses
-    let _admin = Address::generate(&env);
+    let admin = Address::generate(&env);
     let usdc_token = Address::generate(&env);
     let _creator = Address::generate(&env);
-    let _user1 = Address::generate(&env);
-    let _user2 = Address::generate(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
 
     // Step 2: Initialize all contracts
     factory_client.initialize(&admin, &usdc_token, &treasury_id);
@@ -137,7 +137,7 @@ fn test_market_creation_and_trading() {
     let factory_client = MarketFactoryClient::new(&env, &factory_id);
     let amm_client = AMMClient::new(&env, &amm_id);
 
-    let _admin = Address::generate(&env);
+    let admin = Address::generate(&env);
     let usdc_token = Address::generate(&env);
     let treasury = Address::generate(&env);
 
@@ -163,7 +163,7 @@ fn test_oracle_consensus_flow() {
     let oracle_id = env.register(OracleManager, ());
     let oracle_client = OracleManagerClient::new(&env, &oracle_id);
 
-    let _admin = Address::generate(&env);
+    let admin = Address::generate(&env);
     oracle_client.initialize(&admin, &2u32);
 
     // Register 3 oracles
@@ -190,7 +190,7 @@ fn test_fee_collection_and_distribution() {
     let treasury_id = env.register(Treasury, ());
     let treasury_client = TreasuryClient::new(&env, &treasury_id);
 
-    let _admin = Address::generate(&env);
+    let admin = Address::generate(&env);
     let usdc_token = Address::generate(&env);
     let factory = Address::generate(&env);
 
