@@ -652,19 +652,34 @@
           "v0": {
             "topics": [
               {
-                "symbol": "MarketResolved"
+                "symbol": "market_resolved_event"
               }
             ],
             "data": {
-              "vec": [
+              "map": [
                 {
-                  "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                  "key": {
+                    "symbol": "final_outcome"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
                 },
                 {
-                  "u32": 1
+                  "key": {
+                    "symbol": "market_id"
+                  },
+                  "val": {
+                    "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                  }
                 },
                 {
-                  "u64": "3010"
+                  "key": {
+                    "symbol": "timestamp"
+                  },
+                  "val": {
+                    "u64": "3010"
+                  }
                 }
               ]
             }
