@@ -92,8 +92,7 @@ fn setup_test_market(
         admin,
         usdc_address,
         market_contract,
-    )
-    (client, market_id, creator, _admin, usdc_address)
+    )(client, market_id, creator, _admin, usdc_address)
 }
 
 /// Helper to setup market with token for claim tests
