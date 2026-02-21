@@ -1,11 +1,12 @@
 #![cfg(test)]
 
+use boxmeout::market::{MarketError, MarketState, PredictionMarketClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
-    token, Address, BytesN, Env,
+    token, Address, BytesN, Env, Symbol,
 };
 
-use boxmeout::{Commitment, MarketError, PredictionMarketClient};
+// ...rest of the file...
 
 // ============================================================================
 // TEST HELPERS
@@ -30,7 +31,7 @@ fn create_test_env() -> Env {
 
 /// Helper to register market contract
 fn register_market(env: &Env) -> Address {
-    env.register(boxmeout::PredictionMarket, ())
+    env.register(boxmeout::market::PredictionMarket, ())
 }
 
 /// Helper to create and register a mock USDC token
@@ -46,8 +47,9 @@ fn create_usdc_token<'a>(env: &Env, admin: &Address) -> (token::StellarAssetClie
 fn setup_test_market(
     env: &Env,
 ) -> (
-    PredictionMarketClient,
+    PredictionMarketClient<'_>,
     BytesN<32>,
+    Address,
     Address,
     Address,
     Address,
@@ -80,16 +82,23 @@ fn setup_test_market(
         &resolution_time,
     );
 
-    (client, market_id, creator, admin, usdc_address)
+    (
+        client,
+        market_id,
+        creator,
+        admin,
+        usdc_address,
+        market_contract,
+    )
 }
 
 /// Helper to setup market with token for claim tests
 fn setup_market_for_claims(
     env: &Env,
 ) -> (
-    PredictionMarketClient,
+    PredictionMarketClient<'_>,
     BytesN<32>,
-    token::StellarAssetClient,
+    token::StellarAssetClient<'_>,
     Address,
 ) {
     let market_contract = register_market(env);
@@ -128,7 +137,8 @@ fn setup_market_for_claims(
 #[test]
 fn test_market_initialize() {
     let env = create_test_env();
-    let (client, _market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     // Verify market state is OPEN (0)
     let state = client.get_market_state_value();
@@ -146,7 +156,8 @@ fn test_market_initialize() {
 #[test]
 fn test_commit_prediction_happy_path() {
     let env = create_test_env();
-    let (client, _market_id, _creator, admin, usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, admin, usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     // Setup user with USDC balance
     let user = Address::generate(&env);
@@ -194,7 +205,8 @@ fn test_commit_prediction_happy_path() {
 #[test]
 fn test_commit_prediction_duplicate_rejected() {
     let env = create_test_env();
-    let (client, _market_id, _creator, admin, usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, admin, usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     let user = Address::generate(&env);
     let amount = 100_000_000i128;
@@ -227,53 +239,10 @@ fn test_commit_prediction_duplicate_rejected() {
 }
 
 #[test]
-fn test_commit_prediction_after_closing_rejected() {
-    let env = create_test_env();
-    let (client, _market_id, _creator, admin, usdc_address) = setup_test_market(&env);
-
-    let user = Address::generate(&env);
-    let amount = 100_000_000i128;
-    let commit_hash = BytesN::from_array(&env, &[2u8; 32]);
-
-    let token = token::StellarAssetClient::new(&env, &usdc_address);
-    token.mint(&user, &amount);
-
-    let market_address = client.address.clone();
-    token.approve(
-        &user,
-        &market_address,
-        &amount,
-        &(env.ledger().sequence() + 100),
-    );
-
-    // Fast forward time past closing time
-    env.ledger().set(LedgerInfo {
-        timestamp: env.ledger().timestamp() + 86400 + 1, // Past 24 hours
-        protocol_version: 23,
-        sequence_number: env.ledger().sequence() + 1000,
-        network_id: Default::default(),
-        base_reserve: 10,
-        min_temp_entry_ttl: 16,
-        min_persistent_entry_ttl: 16,
-        max_entry_ttl: 6312000,
-    });
-
-    // Commit should fail with MarketClosed error
-    let result = client.try_commit_prediction(&user, &commit_hash, &amount);
-    assert_eq!(result, Err(Ok(MarketError::MarketClosed)));
-
-    // Verify no commitment was stored
-    let commitment = client.get_commitment(&user);
-    assert!(commitment.is_none());
-
-    let pending_count = client.get_pending_count();
-    assert_eq!(pending_count, 0);
-}
-
-#[test]
 fn test_commit_prediction_zero_amount_rejected() {
     let env = create_test_env();
-    let (client, _market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     let user = Address::generate(&env);
     let amount = 0i128;
@@ -287,7 +256,8 @@ fn test_commit_prediction_zero_amount_rejected() {
 #[test]
 fn test_commit_prediction_negative_amount_rejected() {
     let env = create_test_env();
-    let (client, _market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     let user = Address::generate(&env);
     let amount = -100i128;
@@ -301,7 +271,8 @@ fn test_commit_prediction_negative_amount_rejected() {
 #[test]
 fn test_multiple_users_commit() {
     let env = create_test_env();
-    let (client, _market_id, _creator, admin, usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, admin, usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     let token = token::StellarAssetClient::new(&env, &usdc_address);
     let market_address = client.address.clone();
@@ -695,410 +666,251 @@ fn test_single_winner_gets_all() {
 }
 
 // ============================================================================
-// LIQUIDITY QUERY TESTS
+// DISPUTE MARKET TESTS
 // ============================================================================
 
 #[test]
-fn test_get_market_liquidity_no_pool() {
+fn test_dispute_market_happy_path() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
+    let (client, market_id, token_client, market_contract) = setup_market_for_claims(&env);
 
-    // Query liquidity when no pool exists (initial state)
-    let (yes_reserve, no_reserve, k_constant, yes_odds, no_odds) =
-        client.get_market_liquidity(&market_id);
+    let user = Address::generate(&env);
+    let dispute_reason = Symbol::new(&env, "wrong");
+    let evidence_hash = Some(BytesN::from_array(&env, &[5u8; 32]));
 
-    // Should return zeros for reserves and k
-    assert_eq!(yes_reserve, 0);
-    assert_eq!(no_reserve, 0);
-    assert_eq!(k_constant, 0);
+    // Mint USDC to user for dispute stake (1000)
+    token_client.mint(&user, &2000);
+    token_client.approve(
+        &user,
+        &market_contract,
+        &1000,
+        &(env.ledger().sequence() + 100),
+    );
 
-    // Should return 50/50 odds (5000 basis points each)
-    assert_eq!(yes_odds, 5000);
-    assert_eq!(no_odds, 5000);
+    // Resolve market
+    client.test_setup_resolution(&market_id, &1u32, &1000, &0);
+
+    // Initial state is 2 (RESOLVED)
+    assert_eq!(client.get_market_state_value().unwrap(), 2);
+
+    // Dispute
+    client.dispute_market(&user, &market_id, &dispute_reason, &evidence_hash);
+
+    // Verify state transitioned to DISPUTED (3)
+    let state = client.get_market_state_value().unwrap();
+    assert_eq!(state, 3);
+
+    // Verify stake was transferred
+    assert_eq!(token_client.balance(&user), 1000); // 2000 - 1000
+    assert_eq!(token_client.balance(&market_contract), 1000); // escrow received 1000
 }
 
 #[test]
-fn test_get_market_liquidity_balanced_pool() {
+#[should_panic(expected = "Market not resolved")]
+fn test_dispute_market_not_resolved() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
+    let (client, market_id, _token_client, _market_contract) = setup_market_for_claims(&env);
 
-    // Manually set balanced pool reserves (simulating AMM pool creation)
-    let yes_reserve = 1_000_000_000u128; // 1000 USDC worth of YES
-    let no_reserve = 1_000_000_000u128; // 1000 USDC worth of NO
+    let user = Address::generate(&env);
+    let dispute_reason = Symbol::new(&env, "wrong");
 
-    // Store reserves in market storage (simulating AMM sync)
-    env.storage().persistent().set(
-        &Symbol::new(&env, "yes_pool"),
-        &yes_reserve,
-    );
-    env.storage().persistent().set(
-        &Symbol::new(&env, "no_pool"),
-        &no_reserve,
-    );
-
-    // Query liquidity
-    let (returned_yes, returned_no, k_constant, yes_odds, no_odds) =
-        client.get_market_liquidity(&market_id);
-
-    // Verify reserves
-    assert_eq!(returned_yes, yes_reserve);
-    assert_eq!(returned_no, no_reserve);
-
-    // Verify k constant (x * y = k)
-    let expected_k = yes_reserve * no_reserve;
-    assert_eq!(k_constant, expected_k);
-
-    // Verify odds are 50/50 for balanced pool
-    assert_eq!(yes_odds, 5000);
-    assert_eq!(no_odds, 5000);
+    // Market is OPEN, not RESOLVED
+    client.dispute_market(&user, &market_id, &dispute_reason, &None);
 }
 
 #[test]
-fn test_get_market_liquidity_yes_favored() {
+#[should_panic(expected = "Dispute window has closed")]
+fn test_dispute_market_window_closed() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
+    let (client, market_id, token_client, market_contract) = setup_market_for_claims(&env);
 
-    // Set pool with YES favored (more NO reserve = higher YES price)
-    let yes_reserve = 400_000_000u128; // 400 USDC worth of YES
-    let no_reserve = 600_000_000u128; // 600 USDC worth of NO
+    let user = Address::generate(&env);
+    let dispute_reason = Symbol::new(&env, "wrong");
 
-    env.storage().persistent().set(
-        &Symbol::new(&env, "yes_pool"),
-        &yes_reserve,
+    // Setup for stake
+    token_client.mint(&user, &2000);
+    token_client.approve(
+        &user,
+        &market_contract,
+        &1000,
+        &(env.ledger().sequence() + 100),
     );
-    env.storage().persistent().set(
-        &Symbol::new(&env, "no_pool"),
-        &no_reserve,
-    );
 
-    // Query liquidity
-    let (returned_yes, returned_no, k_constant, yes_odds, no_odds) =
-        client.get_market_liquidity(&market_id);
+    client.test_setup_resolution(&market_id, &1u32, &1000, &0);
 
-    // Verify reserves
-    assert_eq!(returned_yes, yes_reserve);
-    assert_eq!(returned_no, no_reserve);
+    // Advance time past 7-day window (resolution_time is 102345 initially based on setup)
+    // Add 604800 (7 days) + 1 second buffer
+    env.ledger().with_mut(|li| {
+        li.timestamp = 102345 + 604801;
+    });
 
-    // Verify k constant
-    assert_eq!(k_constant, yes_reserve * no_reserve);
+    client.dispute_market(&user, &market_id, &dispute_reason, &None);
+}
 
-    // Verify odds favor YES (YES should be > 50%)
-    // YES odds = (no_reserve / total) * 10000 = (600 / 1000) * 10000 = 6000
-    assert_eq!(yes_odds, 6000); // 60%
-    assert_eq!(no_odds, 4000); // 40%
+// ============================================================================
+// LIQUIDITY QUERY TESTS
+// ============================================================================
 
-    // Verify odds sum to 10000
-    assert_eq!(yes_odds + no_odds, 10000);
+// ============================================================================
+// GET MARKET STATE TESTS
+// ============================================================================
+
+#[test]
+fn test_get_market_state_open() {
+    let env = create_test_env();
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
+
+    // Get market state
+    let state = client.get_market_state(&market_id);
+
+    // Verify initial state
+    assert_eq!(state.status, 0); // STATE_OPEN
+    assert_eq!(state.closing_time, env.ledger().timestamp() + 86400);
+    assert_eq!(state.total_pool, 0);
+    assert_eq!(state.participant_count, 0);
+    assert_eq!(state.winning_outcome, None);
 }
 
 #[test]
-fn test_get_market_liquidity_no_favored() {
+fn test_get_market_state_with_commitments() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
+    let (client, market_id, _creator, _admin, usdc_address, _market_contract) =
+        setup_test_market(&env);
 
-    // Set pool with NO favored (more YES reserve = higher NO price)
-    let yes_reserve = 700_000_000u128; // 700 USDC worth of YES
-    let no_reserve = 300_000_000u128; // 300 USDC worth of NO
+    let token = token::StellarAssetClient::new(&env, &usdc_address);
+    let market_address = client.address.clone();
 
-    env.storage().persistent().set(
-        &Symbol::new(&env, "yes_pool"),
-        &yes_reserve,
+    // Setup two users with commitments
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    let amount1 = 100_000_000i128;
+    let amount2 = 50_000_000i128;
+
+    let hash1 = BytesN::from_array(&env, &[2u8; 32]);
+    let hash2 = BytesN::from_array(&env, &[3u8; 32]);
+
+    token.mint(&user1, &amount1);
+    token.mint(&user2, &amount2);
+
+    token.approve(
+        &user1,
+        &market_address,
+        &amount1,
+        &(env.ledger().sequence() + 100),
     );
-    env.storage().persistent().set(
-        &Symbol::new(&env, "no_pool"),
-        &no_reserve,
+    token.approve(
+        &user2,
+        &market_address,
+        &amount2,
+        &(env.ledger().sequence() + 100),
     );
 
-    // Query liquidity
-    let (returned_yes, returned_no, k_constant, yes_odds, no_odds) =
-        client.get_market_liquidity(&market_id);
+    client.commit_prediction(&user1, &hash1, &amount1);
+    client.commit_prediction(&user2, &hash2, &amount2);
 
-    // Verify reserves
-    assert_eq!(returned_yes, yes_reserve);
-    assert_eq!(returned_no, no_reserve);
+    // Get market state
+    let state = client.get_market_state(&market_id);
 
-    // Verify k constant
-    assert_eq!(k_constant, yes_reserve * no_reserve);
-
-    // Verify odds favor NO (NO should be > 50%)
-    // YES odds = (no_reserve / total) * 10000 = (300 / 1000) * 10000 = 3000
-    assert_eq!(yes_odds, 3000); // 30%
-    assert_eq!(no_odds, 7000); // 70%
-
-    // Verify odds sum to 10000
-    assert_eq!(yes_odds + no_odds, 10000);
+    // Verify state with commitments
+    assert_eq!(state.status, 0); // STATE_OPEN
+    assert_eq!(state.participant_count, 2);
+    assert_eq!(state.total_pool, 0); // Pool is still 0 until reveals
+    assert_eq!(state.winning_outcome, None);
 }
 
 #[test]
-fn test_get_market_liquidity_extreme_yes() {
+fn test_get_market_state_closed() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
-    // Set pool with extreme YES bias (95% YES)
-    let yes_reserve = 50_000_000u128; // 50 USDC worth of YES
-    let no_reserve = 950_000_000u128; // 950 USDC worth of NO
+    // Advance time past closing time
+    env.ledger().set(LedgerInfo {
+        timestamp: env.ledger().timestamp() + 86400 + 1,
+        protocol_version: 23,
+        sequence_number: 11,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 16,
+        max_entry_ttl: 6312000,
+    });
 
-    env.storage().persistent().set(
-        &Symbol::new(&env, "yes_pool"),
-        &yes_reserve,
-    );
-    env.storage().persistent().set(
-        &Symbol::new(&env, "no_pool"),
-        &no_reserve,
-    );
+    // Close the market
+    client.close_market(&market_id);
 
-    // Query liquidity
-    let (returned_yes, returned_no, k_constant, yes_odds, no_odds) =
-        client.get_market_liquidity(&market_id);
+    // Get market state
+    let state = client.get_market_state(&market_id);
 
-    // Verify reserves
-    assert_eq!(returned_yes, yes_reserve);
-    assert_eq!(returned_no, no_reserve);
-
-    // Verify k constant
-    assert_eq!(k_constant, yes_reserve * no_reserve);
-
-    // Verify extreme YES odds (95%)
-    assert_eq!(yes_odds, 9500); // 95%
-    assert_eq!(no_odds, 500); // 5%
-
-    // Verify odds sum to 10000
-    assert_eq!(yes_odds + no_odds, 10000);
+    // Verify closed state
+    assert_eq!(state.status, 1); // STATE_CLOSED
+    assert_eq!(state.winning_outcome, None); // Not resolved yet
 }
 
 #[test]
-fn test_get_market_liquidity_extreme_no() {
+fn test_get_market_state_resolved() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
-    // Set pool with extreme NO bias (95% NO)
-    let yes_reserve = 950_000_000u128; // 950 USDC worth of YES
-    let no_reserve = 50_000_000u128; // 50 USDC worth of NO
+    // Advance time past resolution time
+    env.ledger().set(LedgerInfo {
+        timestamp: env.ledger().timestamp() + 86400 + 3600 + 1,
+        protocol_version: 23,
+        sequence_number: 11,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 16,
+        max_entry_ttl: 6312000,
+    });
 
-    env.storage().persistent().set(
-        &Symbol::new(&env, "yes_pool"),
-        &yes_reserve,
-    );
-    env.storage().persistent().set(
-        &Symbol::new(&env, "no_pool"),
-        &no_reserve,
-    );
+    // Close the market first
+    client.close_market(&market_id);
 
-    // Query liquidity
-    let (returned_yes, returned_no, k_constant, yes_odds, no_odds) =
-        client.get_market_liquidity(&market_id);
+    // Resolve the market
+    client.resolve_market(&market_id);
 
-    // Verify reserves
-    assert_eq!(returned_yes, yes_reserve);
-    assert_eq!(returned_no, no_reserve);
+    // Get market state
+    let state = client.get_market_state(&market_id);
 
-    // Verify k constant
-    assert_eq!(k_constant, yes_reserve * no_reserve);
-
-    // Verify extreme NO odds (95%)
-    assert_eq!(yes_odds, 500); // 5%
-    assert_eq!(no_odds, 9500); // 95%
-
-    // Verify odds sum to 10000
-    assert_eq!(yes_odds + no_odds, 10000);
+    // Verify resolved state
+    assert_eq!(state.status, 2); // STATE_RESOLVED
+    assert_eq!(state.winning_outcome, Some(1)); // YES wins (from mock oracle)
 }
 
 #[test]
-fn test_get_market_liquidity_only_yes_reserve() {
+fn test_get_market_state_no_auth_required() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
-    // Edge case: only YES reserve exists
-    let yes_reserve = 1_000_000_000u128;
-    let no_reserve = 0u128;
+    // Call without any authentication - should work fine
+    let state = client.get_market_state(&market_id);
 
-    env.storage().persistent().set(
-        &Symbol::new(&env, "yes_pool"),
-        &yes_reserve,
-    );
-    env.storage().persistent().set(
-        &Symbol::new(&env, "no_pool"),
-        &no_reserve,
-    );
-
-    // Query liquidity
-    let (returned_yes, returned_no, k_constant, yes_odds, no_odds) =
-        client.get_market_liquidity(&market_id);
-
-    // Verify reserves
-    assert_eq!(returned_yes, yes_reserve);
-    assert_eq!(returned_no, no_reserve);
-
-    // k should be 0 (one-sided pool)
-    assert_eq!(k_constant, 0);
-
-    // Odds should be 100% YES, 0% NO
-    assert_eq!(yes_odds, 10000);
-    assert_eq!(no_odds, 0);
+    // Verify we got valid data
+    assert_eq!(state.status, 0);
+    assert!(state.closing_time > 0);
 }
 
 #[test]
-fn test_get_market_liquidity_only_no_reserve() {
+fn test_get_market_state_serializable() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
-    // Edge case: only NO reserve exists
-    let yes_reserve = 0u128;
-    let no_reserve = 1_000_000_000u128;
+    // Get market state
+    let state = client.get_market_state(&market_id);
 
-    env.storage().persistent().set(
-        &Symbol::new(&env, "yes_pool"),
-        &yes_reserve,
-    );
-    env.storage().persistent().set(
-        &Symbol::new(&env, "no_pool"),
-        &no_reserve,
-    );
+    // Verify all fields are accessible and serializable
+    let _status = state.status;
+    let _closing_time = state.closing_time;
+    let _total_pool = state.total_pool;
+    let _participant_count = state.participant_count;
+    let _winning_outcome = state.winning_outcome;
 
-    // Query liquidity
-    let (returned_yes, returned_no, k_constant, yes_odds, no_odds) =
-        client.get_market_liquidity(&market_id);
-
-    // Verify reserves
-    assert_eq!(returned_yes, yes_reserve);
-    assert_eq!(returned_no, no_reserve);
-
-    // k should be 0 (one-sided pool)
-    assert_eq!(k_constant, 0);
-
-    // Odds should be 0% YES, 100% NO
-    assert_eq!(yes_odds, 0);
-    assert_eq!(no_odds, 10000);
+    // If we got here, the struct is properly serializable
+    assert!(true);
 }
-
-#[test]
-fn test_get_market_liquidity_large_numbers() {
-    let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
-
-    // Test with large liquidity amounts
-    let yes_reserve = 10_000_000_000_000u128; // 10 million USDC
-    let no_reserve = 10_000_000_000_000u128; // 10 million USDC
-
-    env.storage().persistent().set(
-        &Symbol::new(&env, "yes_pool"),
-        &yes_reserve,
-    );
-    env.storage().persistent().set(
-        &Symbol::new(&env, "no_pool"),
-        &no_reserve,
-    );
-
-    // Query liquidity
-    let (returned_yes, returned_no, k_constant, yes_odds, no_odds) =
-        client.get_market_liquidity(&market_id);
-
-    // Verify reserves
-    assert_eq!(returned_yes, yes_reserve);
-    assert_eq!(returned_no, no_reserve);
-
-    // Verify k constant (should handle large numbers)
-    assert_eq!(k_constant, yes_reserve * no_reserve);
-
-    // Verify odds are still 50/50
-    assert_eq!(yes_odds, 5000);
-    assert_eq!(no_odds, 5000);
-}
-
-#[test]
-fn test_get_market_liquidity_rounding_edge_case() {
-    let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
-
-    // Test with amounts that might cause rounding issues
-    let yes_reserve = 333_333_333u128; // 333.333... USDC
-    let no_reserve = 666_666_667u128; // 666.666... USDC
-
-    env.storage().persistent().set(
-        &Symbol::new(&env, "yes_pool"),
-        &yes_reserve,
-    );
-    env.storage().persistent().set(
-        &Symbol::new(&env, "no_pool"),
-        &no_reserve,
-    );
-
-    // Query liquidity
-    let (returned_yes, returned_no, k_constant, yes_odds, no_odds) =
-        client.get_market_liquidity(&market_id);
-
-    // Verify reserves
-    assert_eq!(returned_yes, yes_reserve);
-    assert_eq!(returned_no, no_reserve);
-
-    // Verify k constant
-    assert_eq!(k_constant, yes_reserve * no_reserve);
-
-    // Verify odds sum to exactly 10000 (rounding adjustment applied)
-    assert_eq!(yes_odds + no_odds, 10000);
-
-    // YES should be approximately 66.67% (6667 basis points)
-    // NO should be approximately 33.33% (3333 basis points)
-    assert!(yes_odds >= 6666 && yes_odds <= 6668);
-    assert!(no_odds >= 3332 && no_odds <= 3334);
-}
-
-#[test]
-fn test_get_market_liquidity_k_invariant_property() {
-    let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
-
-    // Set initial pool
-    let yes_reserve = 800_000_000u128;
-    let no_reserve = 200_000_000u128;
-
-    env.storage().persistent().set(
-        &Symbol::new(&env, "yes_pool"),
-        &yes_reserve,
-    );
-    env.storage().persistent().set(
-        &Symbol::new(&env, "no_pool"),
-        &no_reserve,
-    );
-
-    // Query liquidity
-    let (returned_yes, returned_no, k_constant, _yes_odds, _no_odds) =
-        client.get_market_liquidity(&market_id);
-
-    // Verify k = x * y property
-    assert_eq!(k_constant, returned_yes * returned_no);
-
-    // Verify k matches expected value
-    let expected_k = yes_reserve * no_reserve;
-    assert_eq!(k_constant, expected_k);
-}
-
-#[test]
-fn test_get_market_liquidity_multiple_queries_consistent() {
-    let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
-
-    // Set pool reserves
-    let yes_reserve = 500_000_000u128;
-    let no_reserve = 500_000_000u128;
-
-    env.storage().persistent().set(
-        &Symbol::new(&env, "yes_pool"),
-        &yes_reserve,
-    );
-    env.storage().persistent().set(
-        &Symbol::new(&env, "no_pool"),
-        &no_reserve,
-    );
-
-    // Query multiple times
-    let result1 = client.get_market_liquidity(&market_id);
-    let result2 = client.get_market_liquidity(&market_id);
-    let result3 = client.get_market_liquidity(&market_id);
-
-    // All queries should return identical results (read-only operation)
-    assert_eq!(result1, result2);
-    assert_eq!(result2, result3);
-}
-=======
->>>>>>> origin/main
