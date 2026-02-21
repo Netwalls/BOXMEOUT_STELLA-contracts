@@ -831,9 +831,7 @@ impl OracleManager {
 
         // 8. Store consensus result (override any existing consensus)
         let result_key = (Symbol::new(&env, "consensus_result"), market_id.clone());
-        env.storage()
-            .persistent()
-            .set(&result_key, &forced_outcome);
+        env.storage().persistent().set(&result_key, &forced_outcome);
 
         // 9. Mark market as manually overridden for audit purposes
         let override_flag_key = (Symbol::new(&env, "manual_override"), market_id.clone());
