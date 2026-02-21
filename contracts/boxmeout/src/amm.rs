@@ -1,8 +1,9 @@
 // contracts/amm.rs - Automated Market Maker for Outcome Shares
 // Enables trading YES/NO outcome shares with dynamic odds pricing (Polymarket model)
 
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, Symbol};
-use soroban_sdk::{contract, contractevent, contractimpl, token, Address, BytesN, Env, Symbol};
+use soroban_sdk::{
+    contract, contractevent, contractimpl, contracttype, token, Address, BytesN, Env, Symbol,
+};
 
 #[contractevent]
 pub struct AmmInitializedEvent {
