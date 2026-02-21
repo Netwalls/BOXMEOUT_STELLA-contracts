@@ -10,6 +10,10 @@ const ORACLE_COUNT_KEY: &str = "oracle_count";
 const MARKET_RES_TIME_KEY: &str = "mkt_res_time"; // Market resolution time storage
 const ATTEST_COUNT_YES_KEY: &str = "attest_yes"; // Attestation count for YES outcome
 const ATTEST_COUNT_NO_KEY: &str = "attest_no"; // Attestation count for NO outcome
+const ADMIN_SIGNERS_KEY: &str = "admin_signers"; // Multi-sig admin addresses
+const REQUIRED_SIGNATURES_KEY: &str = "required_sigs"; // Required signatures for multi-sig
+const LAST_OVERRIDE_TIME_KEY: &str = "last_override"; // Timestamp of last emergency override
+const OVERRIDE_COOLDOWN_KEY: &str = "override_cooldown"; // Cooldown period in seconds (default 86400 = 24h)
 const CHALLENGE_STAKE_AMOUNT: i128 = 1000; // Minimum stake required to challenge
 const ORACLE_STAKE_KEY: &str = "oracle_stake"; // Oracle's staked amount
 
@@ -19,6 +23,25 @@ const ORACLE_STAKE_KEY: &str = "oracle_stake"; // Oracle's staked amount
 pub struct Attestation {
     pub attestor: Address,
     pub outcome: u32,
+    pub timestamp: u64,
+}
+
+/// Emergency override approval record
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OverrideApproval {
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
+/// Emergency override record for audit trail
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmergencyOverrideRecord {
+    pub market_id: BytesN<32>,
+    pub forced_outcome: u32,
+    pub justification_hash: BytesN<32>,
+    pub approvers: Vec<Address>,
     pub timestamp: u64,
 }
 
@@ -748,11 +771,11 @@ impl OracleManager {
     /// - forced_outcome: Outcome to set (0=NO, 1=YES)
     /// - justification_hash: Hash of justification document (for transparency)
     pub fn emergency_override(
-        _env: Env,
-        _admin: Address,
-        _market_id: BytesN<32>,
-        _forced_outcome: u32,
-        _reason: Symbol,
+        env: Env,
+        approvers: Vec<Address>,
+        market_id: BytesN<32>,
+        forced_outcome: u32,
+        justification_hash: BytesN<32>,
     ) {
         // 1. Validate forced_outcome is binary (0 or 1)
         if forced_outcome > 1 {
