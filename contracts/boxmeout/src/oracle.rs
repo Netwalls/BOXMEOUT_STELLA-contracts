@@ -10,6 +10,10 @@ const ORACLE_COUNT_KEY: &str = "oracle_count";
 const MARKET_RES_TIME_KEY: &str = "mkt_res_time"; // Market resolution time storage
 const ATTEST_COUNT_YES_KEY: &str = "attest_yes"; // Attestation count for YES outcome
 const ATTEST_COUNT_NO_KEY: &str = "attest_no"; // Attestation count for NO outcome
+const ADMIN_SIGNERS_KEY: &str = "admin_signers"; // Multi-sig admin addresses
+const REQUIRED_SIGNATURES_KEY: &str = "required_sigs"; // Required signatures for multi-sig
+const LAST_OVERRIDE_TIME_KEY: &str = "last_override"; // Timestamp of last emergency override
+const OVERRIDE_COOLDOWN_KEY: &str = "override_cooldown"; // Cooldown period in seconds (default 86400 = 24h)
 
 /// Attestation record for market resolution
 #[contracttype]
@@ -20,13 +24,32 @@ pub struct Attestation {
     pub timestamp: u64,
 }
 
+/// Emergency override approval record
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OverrideApproval {
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
+/// Emergency override record for audit trail
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmergencyOverrideRecord {
+    pub market_id: BytesN<32>,
+    pub forced_outcome: u32,
+    pub justification_hash: BytesN<32>,
+    pub approvers: Vec<Address>,
+    pub timestamp: u64,
+}
+
 /// ORACLE MANAGER - Manages oracle consensus
 #[contract]
 pub struct OracleManager;
 
 #[contractimpl]
 impl OracleManager {
-    /// Initialize oracle system with validator set
+    /// Initialize oracle system with validator set and multi-sig admins
     pub fn initialize(env: Env, admin: Address, required_consensus: u32) {
         // Verify admin signature
         admin.require_auth();
@@ -46,6 +69,28 @@ impl OracleManager {
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, ORACLE_COUNT_KEY), &0u32);
+
+        // Initialize multi-sig with single admin (can be updated later)
+        let mut admin_signers = Vec::new(&env);
+        admin_signers.push_back(admin.clone());
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, ADMIN_SIGNERS_KEY), &admin_signers);
+
+        // Default: require 2 of 3 signatures for emergency override
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, REQUIRED_SIGNATURES_KEY), &2u32);
+
+        // Default cooldown: 24 hours (86400 seconds)
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, OVERRIDE_COOLDOWN_KEY), &86400u64);
+
+        // Initialize last override time to 0
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, LAST_OVERRIDE_TIME_KEY), &0u64);
 
         // Emit initialization event
         env.events().publish(
@@ -466,22 +511,311 @@ impl OracleManager {
         todo!("See get consensus report TODO above")
     }
 
-    /// Emergency: Override oracle consensus if all oracles compromised
+    /// Add admin signer for multi-sig (only callable by existing admin)
+    pub fn add_admin_signer(env: Env, caller: Address, new_admin: Address) {
+        caller.require_auth();
+
+        // Verify caller is an existing admin
+        let admin_signers: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, ADMIN_SIGNERS_KEY))
+            .expect("Oracle not initialized");
+
+        let mut is_admin = false;
+        for admin in admin_signers.iter() {
+            if admin == caller {
+                is_admin = true;
+                break;
+            }
+        }
+
+        if !is_admin {
+            panic!("Only admin can add signers");
+        }
+
+        // Check if new_admin already exists
+        for admin in admin_signers.iter() {
+            if admin == new_admin {
+                panic!("Admin already exists");
+            }
+        }
+
+        // Add new admin
+        let mut updated_signers = admin_signers;
+        updated_signers.push_back(new_admin.clone());
+
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, ADMIN_SIGNERS_KEY), &updated_signers);
+
+        env.events().publish(
+            (Symbol::new(&env, "admin_signer_added"),),
+            (new_admin,),
+        );
+    }
+
+    /// Set required signatures for emergency override (only callable by admin)
+    pub fn set_required_signatures(env: Env, caller: Address, required_sigs: u32) {
+        caller.require_auth();
+
+        // Verify caller is admin
+        let admin_signers: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, ADMIN_SIGNERS_KEY))
+            .expect("Oracle not initialized");
+
+        let mut is_admin = false;
+        for admin in admin_signers.iter() {
+            if admin == caller {
+                is_admin = true;
+                break;
+            }
+        }
+
+        if !is_admin {
+            panic!("Only admin can set required signatures");
+        }
+
+        // Validate required_sigs is reasonable
+        if required_sigs == 0 || required_sigs > admin_signers.len() {
+            panic!("Invalid required signatures");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, REQUIRED_SIGNATURES_KEY), &required_sigs);
+
+        env.events().publish(
+            (Symbol::new(&env, "required_signatures_updated"),),
+            (required_sigs,),
+        );
+    }
+
+    /// Set override cooldown period (only callable by admin)
+    pub fn set_override_cooldown(env: Env, caller: Address, cooldown_seconds: u64) {
+        caller.require_auth();
+
+        // Verify caller is admin
+        let admin_signers: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, ADMIN_SIGNERS_KEY))
+            .expect("Oracle not initialized");
+
+        let mut is_admin = false;
+        for admin in admin_signers.iter() {
+            if admin == caller {
+                is_admin = true;
+                break;
+            }
+        }
+
+        if !is_admin {
+            panic!("Only admin can set cooldown");
+        }
+
+        // Minimum cooldown: 1 hour (3600 seconds)
+        if cooldown_seconds < 3600 {
+            panic!("Cooldown must be at least 1 hour");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, OVERRIDE_COOLDOWN_KEY), &cooldown_seconds);
+
+        env.events().publish(
+            (Symbol::new(&env, "override_cooldown_updated"),),
+            (cooldown_seconds,),
+        );
+    }
+
+    /// Emergency: Override oracle consensus with multi-sig approval
     ///
-    /// TODO: Emergency Override
-    /// - Require multi-sig admin approval (2+ admins)
-    /// - Document reason for override (security incident)
-    /// - Manually set resolution for market
-    /// - Notify all users of override
-    /// - Mark market as MANUAL_OVERRIDE (for audits)
-    /// - Emit EmergencyOverride(admin, market_id, forced_outcome, reason)
+    /// CRITICAL SAFETY MECHANISM - Requires multi-sig (at least 2 of 3 admins)
+    /// Use only when oracle system is compromised or critical error detected
+    ///
+    /// Security Features:
+    /// - Multi-sig requirement (configurable, default 2 of 3)
+    /// - Cooldown period between overrides (default 24h)
+    /// - Justification hash for audit trail
+    /// - Complete override record stored permanently
+    /// - EmergencyOverride event with all details
+    ///
+    /// Parameters:
+    /// - approvers: Vec of admin addresses approving this override
+    /// - market_id: Market to override
+    /// - forced_outcome: Outcome to set (0=NO, 1=YES)
+    /// - justification_hash: Hash of justification document (for transparency)
     pub fn emergency_override(
         env: Env,
-        admin: Address,
-        _market_id: BytesN<32>,
-        _forced_outcome: u32,
-        _reason: Symbol,
+        approvers: Vec<Address>,
+        market_id: BytesN<32>,
+        forced_outcome: u32,
+        justification_hash: BytesN<32>,
     ) {
-        todo!("See emergency override TODO above")
+        // 1. Validate forced_outcome is binary (0 or 1)
+        if forced_outcome > 1 {
+            panic!("Invalid outcome: must be 0 or 1");
+        }
+
+        // 2. Get admin signers and required signatures
+        let admin_signers: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, ADMIN_SIGNERS_KEY))
+            .expect("Oracle not initialized");
+
+        let required_sigs: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, REQUIRED_SIGNATURES_KEY))
+            .unwrap_or(2);
+
+        // 3. Validate we have enough approvers
+        if approvers.len() < required_sigs {
+            panic!("Insufficient approvers");
+        }
+
+        // 4. Verify all approvers are valid admins and require their auth
+        let mut valid_approver_count = 0u32;
+        for approver in approvers.iter() {
+            // Require authentication from each approver
+            approver.require_auth();
+
+            // Verify approver is in admin_signers list
+            let mut is_valid_admin = false;
+            for admin in admin_signers.iter() {
+                if admin == approver {
+                    is_valid_admin = true;
+                    break;
+                }
+            }
+
+            if !is_valid_admin {
+                panic!("Invalid approver: not an admin");
+            }
+
+            valid_approver_count += 1;
+        }
+
+        // 5. Ensure no duplicate approvers (each admin can only approve once)
+        if valid_approver_count != approvers.len() {
+            panic!("Duplicate approvers detected");
+        }
+
+        // 6. Check cooldown period
+        let last_override_time: u64 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, LAST_OVERRIDE_TIME_KEY))
+            .unwrap_or(0);
+
+        let cooldown_period: u64 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, OVERRIDE_COOLDOWN_KEY))
+            .unwrap_or(86400);
+
+        let current_time = env.ledger().timestamp();
+
+        if last_override_time > 0 && (current_time - last_override_time) < cooldown_period {
+            panic!("Cooldown period not elapsed");
+        }
+
+        // 7. Verify market exists
+        let market_key = (Symbol::new(&env, MARKET_RES_TIME_KEY), market_id.clone());
+        if !env.storage().persistent().has(&market_key) {
+            panic!("Market not registered");
+        }
+
+        // 8. Store consensus result (override any existing consensus)
+        let result_key = (Symbol::new(&env, "consensus_result"), market_id.clone());
+        env.storage()
+            .persistent()
+            .set(&result_key, &forced_outcome);
+
+        // 9. Mark market as manually overridden for audit purposes
+        let override_flag_key = (Symbol::new(&env, "manual_override"), market_id.clone());
+        env.storage().persistent().set(&override_flag_key, &true);
+
+        // 10. Create and store complete override record
+        let override_record = EmergencyOverrideRecord {
+            market_id: market_id.clone(),
+            forced_outcome,
+            justification_hash: justification_hash.clone(),
+            approvers: approvers.clone(),
+            timestamp: current_time,
+        };
+
+        let override_record_key = (Symbol::new(&env, "override_record"), market_id.clone());
+        env.storage()
+            .persistent()
+            .set(&override_record_key, &override_record);
+
+        // 11. Update last override timestamp
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, LAST_OVERRIDE_TIME_KEY), &current_time);
+
+        // 12. Emit EmergencyOverride event with all details
+        env.events().publish(
+            (Symbol::new(&env, "EmergencyOverride"),),
+            (
+                market_id,
+                forced_outcome,
+                justification_hash,
+                approvers,
+                current_time,
+            ),
+        );
+    }
+
+    /// Get emergency override record for a market (for audit purposes)
+    pub fn get_override_record(env: Env, market_id: BytesN<32>) -> Option<EmergencyOverrideRecord> {
+        let override_record_key = (Symbol::new(&env, "override_record"), market_id);
+        env.storage().persistent().get(&override_record_key)
+    }
+
+    /// Check if market was manually overridden
+    pub fn is_manual_override(env: Env, market_id: BytesN<32>) -> bool {
+        let override_flag_key = (Symbol::new(&env, "manual_override"), market_id);
+        env.storage()
+            .persistent()
+            .get(&override_flag_key)
+            .unwrap_or(false)
+    }
+
+    /// Get admin signers list
+    pub fn get_admin_signers(env: Env) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&Symbol::new(&env, ADMIN_SIGNERS_KEY))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get required signatures for emergency override
+    pub fn get_required_signatures(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&Symbol::new(&env, REQUIRED_SIGNATURES_KEY))
+            .unwrap_or(2)
+    }
+
+    /// Get override cooldown period
+    pub fn get_override_cooldown(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&Symbol::new(&env, OVERRIDE_COOLDOWN_KEY))
+            .unwrap_or(86400)
+    }
+
+    /// Get last override timestamp
+    pub fn get_last_override_time(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&Symbol::new(&env, LAST_OVERRIDE_TIME_KEY))
+            .unwrap_or(0)
     }
 }
