@@ -1,6 +1,8 @@
 #![cfg(test)]
 
-use boxmeout::market::{Commitment, MarketError, MarketState, PredictionMarket, PredictionMarketClient};
+use boxmeout::market::{
+    Commitment, MarketError, MarketState, PredictionMarket, PredictionMarketClient,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
     token, Address, BytesN, Env, Symbol,
@@ -82,7 +84,14 @@ fn setup_test_market(
         &resolution_time,
     );
 
-    (client, market_id, creator, admin, usdc_address, market_contract)
+    (
+        client,
+        market_id,
+        creator,
+        admin,
+        usdc_address,
+        market_contract,
+    )
 }
 
 /// Helper to setup market with token for claim tests
@@ -130,7 +139,8 @@ fn setup_market_for_claims(
 #[test]
 fn test_market_initialize() {
     let env = create_test_env();
-    let (client, _market_id, _creator, _admin, _usdc_address, _market_contract) = setup_test_market(&env);
+    let (client, _market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     // Verify market state is OPEN (0)
     let state = client.get_market_state_value();
@@ -148,7 +158,8 @@ fn test_market_initialize() {
 #[test]
 fn test_commit_prediction_happy_path() {
     let env = create_test_env();
-    let (client, _market_id, _creator, admin, usdc_address, _market_contract) = setup_test_market(&env);
+    let (client, _market_id, _creator, admin, usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     // Setup user with USDC balance
     let user = Address::generate(&env);
@@ -196,7 +207,8 @@ fn test_commit_prediction_happy_path() {
 #[test]
 fn test_commit_prediction_duplicate_rejected() {
     let env = create_test_env();
-    let (client, _market_id, _creator, admin, usdc_address, _market_contract) = setup_test_market(&env);
+    let (client, _market_id, _creator, admin, usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     let user = Address::generate(&env);
     let amount = 100_000_000i128;
@@ -231,7 +243,8 @@ fn test_commit_prediction_duplicate_rejected() {
 #[test]
 fn test_commit_prediction_zero_amount_rejected() {
     let env = create_test_env();
-    let (client, _market_id, _creator, _admin, _usdc_address, _market_contract) = setup_test_market(&env);
+    let (client, _market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     let user = Address::generate(&env);
     let amount = 0i128;
@@ -245,7 +258,8 @@ fn test_commit_prediction_zero_amount_rejected() {
 #[test]
 fn test_commit_prediction_negative_amount_rejected() {
     let env = create_test_env();
-    let (client, _market_id, _creator, _admin, _usdc_address, _market_contract) = setup_test_market(&env);
+    let (client, _market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     let user = Address::generate(&env);
     let amount = -100i128;
@@ -259,7 +273,8 @@ fn test_commit_prediction_negative_amount_rejected() {
 #[test]
 fn test_multiple_users_commit() {
     let env = create_test_env();
-    let (client, _market_id, _creator, admin, usdc_address, _market_contract) = setup_test_market(&env);
+    let (client, _market_id, _creator, admin, usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     let token = token::StellarAssetClient::new(&env, &usdc_address);
     let market_address = client.address.clone();
@@ -663,7 +678,8 @@ fn test_single_winner_gets_all() {
 #[test]
 fn test_get_market_state_open() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) = setup_test_market(&env);
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     // Get market state
     let state = client.get_market_state(&market_id);
@@ -679,7 +695,8 @@ fn test_get_market_state_open() {
 #[test]
 fn test_get_market_state_with_commitments() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, usdc_address, _market_contract) = setup_test_market(&env);
+    let (client, market_id, _creator, _admin, usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     let token = token::StellarAssetClient::new(&env, &usdc_address);
     let market_address = client.address.clone();
@@ -726,7 +743,8 @@ fn test_get_market_state_with_commitments() {
 #[test]
 fn test_get_market_state_closed() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) = setup_test_market(&env);
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     // Advance time past closing time
     env.ledger().set(LedgerInfo {
@@ -754,7 +772,8 @@ fn test_get_market_state_closed() {
 #[test]
 fn test_get_market_state_resolved() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) = setup_test_market(&env);
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     // Advance time past resolution time
     env.ledger().set(LedgerInfo {
@@ -785,7 +804,8 @@ fn test_get_market_state_resolved() {
 #[test]
 fn test_get_market_state_no_auth_required() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) = setup_test_market(&env);
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     // Call without any authentication - should work fine
     let state = client.get_market_state(&market_id);
@@ -798,7 +818,8 @@ fn test_get_market_state_no_auth_required() {
 #[test]
 fn test_get_market_state_serializable() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) = setup_test_market(&env);
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     // Get market state
     let state = client.get_market_state(&market_id);
