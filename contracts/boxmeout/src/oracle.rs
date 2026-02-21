@@ -375,7 +375,7 @@ impl OracleManager {
     /// Called after consensus reached and dispute period elapsed.
     /// Makes cross-contract call to Market.resolve_market().
     /// Locks in final outcome permanently.
-    pub fn finalize_resolution(env: Env, market_id: BytesN<32>, market_address: Address) {
+    pub fn finalize_resolution(env: Env, market_id: BytesN<32>, _market_address: Address) {
         // 1. Validate market is registered
         let market_key = (Symbol::new(&env, MARKET_RES_TIME_KEY), market_id.clone());
         let resolution_time: u64 = env
@@ -385,7 +385,8 @@ impl OracleManager {
             .expect("Market not registered");
 
         // 2. Validate consensus reached
-        let (consensus_reached, final_outcome) = Self::check_consensus(env.clone(), market_id.clone());
+        let (consensus_reached, final_outcome) =
+            Self::check_consensus(env.clone(), market_id.clone());
         if !consensus_reached {
             panic!("Consensus not reached");
         }
@@ -402,27 +403,18 @@ impl OracleManager {
         env.storage().persistent().set(&result_key, &final_outcome);
 
         // 5. Cross-contract call to Market.resolve_market()
-        use crate::market::PredictionMarketClient;
-        let market_client = PredictionMarketClient::new(&env, &market_address);
-        market_client.resolve_market(&market_id);
+        #[cfg(feature = "market")]
+        {
+            use crate::market::PredictionMarketClient;
+            let market_client = PredictionMarketClient::new(&env, &_market_address);
+            market_client.resolve_market(&market_id);
+        }
 
         // 6. Emit ResolutionFinalized event
         env.events().publish(
             (Symbol::new(&env, "ResolutionFinalized"),),
             (market_id, final_outcome, current_time),
         );
-    /// TODO: Finalize Resolution
-    /// - Validate market_id exists
-    /// - Validate consensus already reached
-    /// - Validate time_delay_before_finality has passed
-    /// - Validate no active disputes/challenges
-    /// - Get consensus_result
-    /// - Call market contract's resolve_market() function
-    /// - Pass winning_outcome to market
-    /// - Confirm resolution recorded
-    /// - Emit ResolutionFinalized(market_id, outcome, timestamp)
-    pub fn finalize_resolution(_env: Env, _market_id: BytesN<32>) {
-        todo!("See finalize resolution TODO above")
     }
 
     /// Challenge an attestation (dispute oracle honesty)
@@ -540,17 +532,15 @@ impl OracleManager {
 
         if challenge_valid {
             // Challenge is valid - oracle was dishonest
-            
+
             // 6a. Reduce oracle's reputation/accuracy score (reduce by 20%)
-            accuracy = if accuracy >= 20 { accuracy - 20 } else { 0 };
+            accuracy = accuracy.saturating_sub(20);
             new_reputation = accuracy;
 
             // 6b. Slash oracle's stake (50% of stake)
             slashed_amount = oracle_stake / 2;
             let remaining_stake = oracle_stake - slashed_amount;
-            env.storage()
-                .persistent()
-                .set(&stake_key, &remaining_stake);
+            env.storage().persistent().set(&stake_key, &remaining_stake);
 
             // 6c. Reward challenger with slashed amount
             let challenger_reward_key = (
@@ -591,7 +581,7 @@ impl OracleManager {
             }
         } else {
             // Challenge is invalid - oracle was honest
-            
+
             // 7a. Increase oracle's reputation (increase by 5%)
             accuracy = if accuracy <= 95 { accuracy + 5 } else { 100 };
             new_reputation = accuracy;
@@ -695,11 +685,7 @@ impl OracleManager {
     }
 
     /// Get challenge information for a specific oracle and market
-    pub fn get_challenge(
-        env: Env,
-        oracle: Address,
-        market_id: BytesN<32>,
-    ) -> Option<Challenge> {
+    pub fn get_challenge(env: Env, oracle: Address, market_id: BytesN<32>) -> Option<Challenge> {
         let challenge_key = (Symbol::new(&env, "challenge"), market_id, oracle);
         env.storage().persistent().get(&challenge_key)
     }
@@ -751,6 +737,7 @@ mod tests {
     use soroban_sdk::testutils::{Address as _, Ledger};
     use soroban_sdk::{Address, Env};
 
+    // Do NOT expose contractimpl or initialize here, only use OracleManagerClient
     fn setup_oracle(env: &Env) -> (OracleManagerClient<'_>, Address, Address, Address) {
         let admin = Address::generate(env);
         let oracle1 = Address::generate(env);
@@ -794,7 +781,8 @@ mod tests {
         oracle_client.register_market(&market_id, &resolution_time);
 
         // Move time forward past resolution
-        env.ledger().with_mut(|li| li.timestamp = resolution_time + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp = resolution_time + 1);
 
         // Oracle submits attestation
         let data_hash = BytesN::from_array(&env, &[2u8; 32]);
@@ -852,7 +840,8 @@ mod tests {
         let resolution_time = env.ledger().timestamp() + 100;
 
         oracle_client.register_market(&market_id, &resolution_time);
-        env.ledger().with_mut(|li| li.timestamp = resolution_time + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp = resolution_time + 1);
 
         let data_hash = BytesN::from_array(&env, &[2u8; 32]);
         oracle_client.submit_attestation(&oracle1, &market_id, &1, &data_hash);
@@ -879,7 +868,8 @@ mod tests {
         let resolution_time = env.ledger().timestamp() + 100;
 
         oracle_client.register_market(&market_id, &resolution_time);
-        env.ledger().with_mut(|li| li.timestamp = resolution_time + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp = resolution_time + 1);
 
         let data_hash = BytesN::from_array(&env, &[2u8; 32]);
         oracle_client.submit_attestation(&oracle1, &market_id, &1, &data_hash);
@@ -925,13 +915,14 @@ mod tests {
         let resolution_time = env.ledger().timestamp() + 100;
 
         oracle_client.register_market(&market_id, &resolution_time);
-        env.ledger().with_mut(|li| li.timestamp = resolution_time + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp = resolution_time + 1);
 
         let data_hash = BytesN::from_array(&env, &[2u8; 32]);
         oracle_client.submit_attestation(&oracle1, &market_id, &1, &data_hash);
 
         let initial_stake = oracle_client.get_oracle_stake(&oracle1);
-        let initial_accuracy = oracle_client.get_oracle_accuracy(&oracle1);
+        let _initial_accuracy = oracle_client.get_oracle_accuracy(&oracle1);
 
         let challenger = Address::generate(&env);
         let reason = Symbol::new(&env, "fraud");
@@ -975,7 +966,8 @@ mod tests {
         let resolution_time = env.ledger().timestamp() + 100;
 
         oracle_client.register_market(&market_id, &resolution_time);
-        env.ledger().with_mut(|li| li.timestamp = resolution_time + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp = resolution_time + 1);
 
         let data_hash = BytesN::from_array(&env, &[2u8; 32]);
         oracle_client.submit_attestation(&oracle1, &market_id, &1, &data_hash);
@@ -1030,7 +1022,8 @@ mod tests {
         let resolution_time = env.ledger().timestamp() + 100;
 
         oracle_client.register_market(&market_id, &resolution_time);
-        env.ledger().with_mut(|li| li.timestamp = resolution_time + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp = resolution_time + 1);
 
         let data_hash = BytesN::from_array(&env, &[2u8; 32]);
         oracle_client.submit_attestation(&oracle1, &market_id, &1, &data_hash);
@@ -1097,7 +1090,8 @@ mod tests {
         let resolution_time = env.ledger().timestamp() + 100;
 
         oracle_client.register_market(&market_id, &resolution_time);
-        env.ledger().with_mut(|li| li.timestamp = resolution_time + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp = resolution_time + 1);
 
         let data_hash = BytesN::from_array(&env, &[2u8; 32]);
 
