@@ -2130,8 +2130,7 @@ mod market_leaderboard_tests {
         users.push_back(user2.clone());
         users.push_back(user3.clone());
 
-        let winners =
-            market_client.test_get_leaderboard_with_users(&market_id_bytes, &10, &users);
+        let winners = market_client.test_get_leaderboard_with_users(&market_id_bytes, &10, &users);
 
         assert_eq!(winners.len(), 3);
 
@@ -2187,8 +2186,7 @@ mod market_leaderboard_tests {
         users.push_back(user3.clone());
 
         // Request only top 2
-        let winners =
-            market_client.test_get_leaderboard_with_users(&market_id_bytes, &2, &users);
+        let winners = market_client.test_get_leaderboard_with_users(&market_id_bytes, &2, &users);
 
         assert_eq!(winners.len(), 2);
 
@@ -2227,8 +2225,7 @@ mod market_leaderboard_tests {
         market_client.test_setup_resolution(&market_id_bytes, &1u32, &1000, &500);
 
         let users = Vec::new(&env);
-        let winners =
-            market_client.test_get_leaderboard_with_users(&market_id_bytes, &0, &users);
+        let winners = market_client.test_get_leaderboard_with_users(&market_id_bytes, &0, &users);
 
         assert_eq!(winners.len(), 0);
     }
@@ -2260,8 +2257,7 @@ mod market_leaderboard_tests {
         market_client.test_setup_resolution(&market_id_bytes, &1u32, &0, &1000);
 
         let users = Vec::new(&env);
-        let winners =
-            market_client.test_get_leaderboard_with_users(&market_id_bytes, &10, &users);
+        let winners = market_client.test_get_leaderboard_with_users(&market_id_bytes, &10, &users);
 
         assert_eq!(winners.len(), 0);
     }
@@ -2334,8 +2330,7 @@ mod market_leaderboard_tests {
         users.push_back(loser1.clone());
         users.push_back(winner2.clone());
 
-        let winners =
-            market_client.test_get_leaderboard_with_users(&market_id_bytes, &10, &users);
+        let winners = market_client.test_get_leaderboard_with_users(&market_id_bytes, &10, &users);
 
         // Should only return 2 winners (loser filtered out)
         assert_eq!(winners.len(), 2);
@@ -2386,8 +2381,7 @@ mod market_leaderboard_tests {
         users.push_back(user2.clone());
         users.push_back(user3.clone());
 
-        let winners =
-            market_client.test_get_leaderboard_with_users(&market_id_bytes, &10, &users);
+        let winners = market_client.test_get_leaderboard_with_users(&market_id_bytes, &10, &users);
 
         assert_eq!(winners.len(), 3);
 
@@ -2439,8 +2433,7 @@ mod market_leaderboard_tests {
         users.push_back(user2.clone());
 
         // Request 100 but only 2 winners exist
-        let winners =
-            market_client.test_get_leaderboard_with_users(&market_id_bytes, &100, &users);
+        let winners = market_client.test_get_leaderboard_with_users(&market_id_bytes, &100, &users);
 
         assert_eq!(winners.len(), 2);
     }
