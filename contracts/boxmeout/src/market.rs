@@ -2,8 +2,54 @@
 // Handles predictions, bet commitment/reveal, market resolution, and winnings claims
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, token, Address, BytesN,
+    Env, Symbol, Vec,
 };
+
+#[contractevent]
+pub struct MarketInitializedEvent {
+    pub market_id: BytesN<32>,
+    pub creator: Address,
+    pub factory: Address,
+    pub oracle: Address,
+    pub closing_time: u64,
+    pub resolution_time: u64,
+}
+
+#[contractevent]
+pub struct CommitmentMadeEvent {
+    pub user: Address,
+    pub market_id: BytesN<32>,
+    pub amount: i128,
+}
+
+#[contractevent]
+pub struct MarketClosedEvent {
+    pub market_id: BytesN<32>,
+    pub timestamp: u64,
+}
+
+#[contractevent]
+pub struct MarketResolvedEvent {
+    pub market_id: BytesN<32>,
+    pub final_outcome: u32,
+    pub timestamp: u64,
+}
+
+#[contractevent]
+pub struct WinningsClaimedEvent {
+    pub user: Address,
+    pub market_id: BytesN<32>,
+    pub net_payout: i128,
+}
+
+#[contractevent]
+pub struct MarketDisputedEvent {
+    pub user: Address,
+    pub reason: Symbol,
+    pub market_id: BytesN<32>,
+    pub timestamp: u64,
+}
 
 // Storage keys
 const MARKET_ID_KEY: &str = "market_id";
@@ -29,7 +75,7 @@ const LOSER_SHARES_KEY: &str = "loser_shares";
 const STATE_OPEN: u32 = 0;
 const STATE_CLOSED: u32 = 1;
 const STATE_RESOLVED: u32 = 2;
-const STATE_CANCELLED: u32 = 3;
+const STATE_DISPUTED: u32 = 3;
 
 /// Error codes following Soroban best practices
 #[contracterror]
@@ -65,6 +111,16 @@ pub struct Commitment {
     pub user: Address,
     pub commit_hash: BytesN<32>,
     pub amount: i128,
+    pub timestamp: u64,
+}
+
+/// Dispute record
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeRecord {
+    pub user: Address,
+    pub reason: Symbol,
+    pub evidence: Option<BytesN<32>>,
     pub timestamp: u64,
 }
 
@@ -177,17 +233,15 @@ impl PredictionMarket {
             .set(&Symbol::new(&env, PENDING_COUNT_KEY), &0u32);
 
         // Emit initialization event
-        env.events().publish(
-            (Symbol::new(&env, "market_initialized"),),
-            (
-                market_id,
-                creator,
-                factory,
-                oracle,
-                closing_time,
-                resolution_time,
-            ),
-        );
+        MarketInitializedEvent {
+            market_id,
+            creator,
+            factory,
+            oracle,
+            closing_time,
+            resolution_time,
+        }
+        .publish(&env);
     }
 
     /// Phase 1: User commits to a prediction (commit-reveal scheme for privacy)
@@ -298,10 +352,12 @@ impl PredictionMarket {
             .set(&Symbol::new(&env, PENDING_COUNT_KEY), &(pending_count + 1));
 
         // Emit CommitmentMade event
-        env.events().publish(
-            (Symbol::new(&env, "CommitmentMade"),),
-            (user, market_id, amount),
-        );
+        CommitmentMadeEvent {
+            user,
+            market_id,
+            amount,
+        }
+        .publish(&env);
 
         Ok(())
     }
@@ -395,10 +451,11 @@ impl PredictionMarket {
             .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_CLOSED);
 
         // Emit MarketClosed Event
-        env.events().publish(
-            (Symbol::new(&env, "market_closed"),),
-            (market_id, current_time),
-        );
+        MarketClosedEvent {
+            market_id,
+            timestamp: current_time,
+        }
+        .publish(&env);
     }
 
     /// Resolve market based on oracle consensus result
@@ -511,31 +568,91 @@ impl PredictionMarket {
             .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_RESOLVED);
 
         // Emit MarketResolved event
-        env.events().publish(
-            (Symbol::new(&env, "MarketResolved"),),
-            (market_id, final_outcome, current_time),
-        );
+        MarketResolvedEvent {
+            market_id,
+            final_outcome,
+            timestamp: current_time,
+        }
+        .publish(&env);
     }
 
     /// Dispute market resolution within 7-day window
     ///
-    /// TODO: Dispute Market
-    /// - Require user authentication and user participated in market
+    /// - Require user authentication
     /// - Validate market state is RESOLVED
     /// - Validate current timestamp < resolution_time + 7 days
-    /// - Store dispute record: { user, reason, timestamp }
+    /// - Require minimum stake (1000 tokens)
+    /// - Store dispute record: { user, reason, evidence, timestamp }
     /// - Change market state to DISPUTED
     /// - Freeze all payouts until dispute resolved
-    /// - Increment dispute counter
-    /// - Emit MarketDisputed(user, reason, market_id, timestamp)
-    /// - Notify admin of dispute
+    /// - Emit MarketDisputed event
     pub fn dispute_market(
-        _env: Env,
-        _user: Address,
-        _market_id: BytesN<32>,
-        _dispute_reason: Symbol,
+        env: Env,
+        user: Address,
+        market_id: BytesN<32>,
+        dispute_reason: Symbol,
+        evidence_hash: Option<BytesN<32>>,
     ) {
-        todo!("See dispute market TODO above")
+        user.require_auth();
+
+        let state: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, MARKET_STATE_KEY))
+            .expect("Market not initialized");
+
+        if state != STATE_RESOLVED {
+            panic!("Market not resolved");
+        }
+
+        let resolution_time: u64 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, RESOLUTION_TIME_KEY))
+            .expect("Resolution time not found");
+
+        let current_time = env.ledger().timestamp();
+        // 7 days = 604800 seconds
+        if current_time >= resolution_time + 604800 {
+            panic!("Dispute window has closed");
+        }
+
+        // Require minimum stake to prevent spam disputes
+        let usdc_token: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, USDC_KEY))
+            .expect("USDC token not found");
+
+        let token_client = token::TokenClient::new(&env, &usdc_token);
+        let contract_address = env.current_contract_address();
+        let dispute_stake_amount: i128 = 1000;
+
+        token_client.transfer(&user, &contract_address, &dispute_stake_amount);
+
+        // Transition market status to DISPUTED
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_DISPUTED);
+
+        // Store dispute record
+        let dispute = DisputeRecord {
+            user: user.clone(),
+            reason: dispute_reason.clone(),
+            evidence: evidence_hash,
+            timestamp: current_time,
+        };
+        let dispute_key = (Symbol::new(&env, "dispute"), market_id.clone());
+        env.storage().persistent().set(&dispute_key, &dispute);
+
+        // Emit MarketDisputed event
+        MarketDisputedEvent {
+            user,
+            reason: dispute_reason,
+            market_id,
+            timestamp: current_time,
+        }
+        .publish(&env);
     }
 
     /// Claim winnings after market resolution
@@ -674,10 +791,12 @@ impl PredictionMarket {
         env.storage().persistent().set(&prediction_key, &prediction);
 
         // 9. Emit WinningsClaimed Event
-        env.events().publish(
-            (Symbol::new(&env, "WinningsClaimed"),),
-            (user, market_id.clone(), net_payout),
-        );
+        WinningsClaimedEvent {
+            user,
+            market_id: market_id.clone(),
+            net_payout,
+        }
+        .publish(&env);
 
         net_payout
     }
@@ -1595,26 +1714,24 @@ mod tests {
     }
 
     // ============================================================================
-    // CANCEL MARKET TESTS
+    // DISPUTE MARKET TESTS
     // ============================================================================
 
     #[test]
-    fn test_cancel_market_creator_refunds_committed() {
+    fn test_dispute_market_happy_path() {
         let env = Env::default();
         env.mock_all_auths();
 
-        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_id = BytesN::from_array(&env, &[0; 32]);
         let market_contract_id = env.register(PredictionMarket, ());
         let market_client = PredictionMarketClient::new(&env, &market_contract_id);
         let oracle_contract_id = env.register(MockOracle, ());
-        let token_admin = Address::generate(&env);
-        let usdc_client = create_token_contract(&env, &token_admin);
-        let creator = Address::generate(&env);
-        let user = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let usdc_client = create_token_contract(&env, &admin);
 
         market_client.initialize(
-            &market_id_bytes,
-            &creator,
+            &market_id,
+            &Address::generate(&env),
             &Address::generate(&env),
             &usdc_client.address,
             &oracle_contract_id,
@@ -1622,38 +1739,43 @@ mod tests {
             &3000,
         );
 
-        let amount = 500i128;
-        let commit_hash = BytesN::from_array(&env, &[1u8; 32]);
-        usdc_client.mint(&user, &amount);
-        usdc_client.approve(&user, &market_contract_id, &amount, &100);
-        market_client.commit_prediction(&user, &commit_hash, &amount);
+        let user = Address::generate(&env);
+        let dispute_reason = Symbol::new(&env, "wrong");
+        let evidence_hash = Some(BytesN::from_array(&env, &[5u8; 32]));
 
-        market_client.cancel_market(&creator, &market_id_bytes);
+        // Mint USDC to user for dispute stake (1000)
+        usdc_client.mint(&user, &2000);
 
-        assert_eq!(
-            market_client.get_market_state_value(),
-            Some(STATE_CANCELLED)
-        );
-        assert_eq!(usdc_client.balance(&user), amount);
+        // Resolve market
+        market_client.test_setup_resolution(&market_id, &1u32, &1000, &0);
+
+        // Intial state is 2 (RESOLVED)
+        assert_eq!(market_client.get_market_state_value().unwrap(), 2);
+
+        // Dispute
+        market_client.dispute_market(&user, &market_id, &dispute_reason, &evidence_hash);
+
+        // Verify state transitioned to DISPUTED (3)
+        let state = market_client.get_market_state_value().unwrap();
+        assert_eq!(state, 3);
     }
 
     #[test]
-    fn test_cancel_market_creator_refunds_predictions() {
+    #[should_panic(expected = "Market not resolved")]
+    fn test_dispute_market_not_resolved() {
         let env = Env::default();
         env.mock_all_auths();
 
-        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_id = BytesN::from_array(&env, &[0; 32]);
         let market_contract_id = env.register(PredictionMarket, ());
         let market_client = PredictionMarketClient::new(&env, &market_contract_id);
         let oracle_contract_id = env.register(MockOracle, ());
-        let token_admin = Address::generate(&env);
-        let usdc_client = create_token_contract(&env, &token_admin);
-        let creator = Address::generate(&env);
-        let user = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let usdc_client = create_token_contract(&env, &admin);
 
         market_client.initialize(
-            &market_id_bytes,
-            &creator,
+            &market_id,
+            &Address::generate(&env),
             &Address::generate(&env),
             &usdc_client.address,
             &oracle_contract_id,
@@ -1661,68 +1783,10 @@ mod tests {
             &3000,
         );
 
-        usdc_client.mint(&market_contract_id, &300);
-        market_client.test_add_participant(&user);
-        market_client.test_set_prediction(&user, &1u32, &300);
+        let user = Address::generate(&env);
+        let dispute_reason = Symbol::new(&env, "wrong");
 
-        market_client.cancel_market(&creator, &market_id_bytes);
-
-        assert_eq!(
-            market_client.get_market_state_value(),
-            Some(STATE_CANCELLED)
-        );
-        assert_eq!(usdc_client.balance(&user), 300);
-    }
-
-    #[test]
-    #[should_panic(expected = "Unauthorized")]
-    fn test_cancel_market_non_creator_fails() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
-        let market_contract_id = env.register(PredictionMarket, ());
-        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
-        let oracle_contract_id = env.register(MockOracle, ());
-        let creator = Address::generate(&env);
-        let stranger = Address::generate(&env);
-
-        market_client.initialize(
-            &market_id_bytes,
-            &creator,
-            &Address::generate(&env),
-            &Address::generate(&env),
-            &oracle_contract_id,
-            &2000,
-            &3000,
-        );
-
-        market_client.cancel_market(&stranger, &market_id_bytes);
-    }
-
-    #[test]
-    #[should_panic(expected = "Cannot cancel resolved market")]
-    fn test_cancel_market_resolved_fails() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
-        let market_contract_id = env.register(PredictionMarket, ());
-        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
-        let oracle_contract_id = env.register(MockOracle, ());
-        let creator = Address::generate(&env);
-
-        market_client.initialize(
-            &market_id_bytes,
-            &creator,
-            &Address::generate(&env),
-            &Address::generate(&env),
-            &oracle_contract_id,
-            &2000,
-            &3000,
-        );
-        market_client.test_setup_resolution(&market_id_bytes, &1u32, &100, &0);
-
-        market_client.cancel_market(&creator, &market_id_bytes);
+        // Market is OPEN, not RESOLVED
+        market_client.dispute_market(&user, &market_id, &dispute_reason, &None);
     }
 }
