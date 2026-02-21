@@ -1,15 +1,40 @@
 #![no_std]
 // lib.rs
 
-#[cfg(any(feature = "amm", test, feature = "testutils"))]
+#[cfg(any(
+    feature = "amm",
+    test,
+    feature = "testutils",
+    not(target_family = "wasm")
+))]
 pub mod amm;
-#[cfg(any(feature = "factory", test, feature = "testutils"))]
+#[cfg(any(
+    feature = "factory",
+    test,
+    feature = "testutils",
+    not(target_family = "wasm")
+))]
 pub mod factory;
-#[cfg(any(feature = "market", test, feature = "testutils"))]
+#[cfg(any(
+    feature = "market",
+    test,
+    feature = "testutils",
+    not(target_family = "wasm")
+))]
 pub mod market;
-#[cfg(any(feature = "oracle", test, feature = "testutils"))]
+#[cfg(any(
+    feature = "oracle",
+    test,
+    feature = "testutils",
+    not(target_family = "wasm")
+))]
 pub mod oracle;
-#[cfg(any(feature = "treasury", test, feature = "testutils"))]
+#[cfg(any(
+    feature = "treasury",
+    test,
+    feature = "testutils",
+    not(target_family = "wasm")
+))]
 pub mod treasury;
 
 pub mod helpers;
