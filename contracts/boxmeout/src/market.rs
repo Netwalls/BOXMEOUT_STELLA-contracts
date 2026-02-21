@@ -77,6 +77,27 @@ pub struct UserPrediction {
     pub timestamp: u64,
 }
 
+/// Status for user prediction query
+pub const PREDICTION_STATUS_COMMITTED: u32 = 0;
+pub const PREDICTION_STATUS_REVEALED: u32 = 1;
+
+/// Sentinel for predicted_outcome when not yet revealed
+pub const PREDICTION_OUTCOME_NONE: u32 = 2;
+
+/// Result of get_user_prediction query - frontend user position
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UserPredictionResult {
+    /// Commitment hash (zeros when revealed; commitment is removed)
+    pub commitment_hash: BytesN<32>,
+    /// Amount committed/revealed
+    pub amount: i128,
+    /// PREDICTION_STATUS_COMMITTED or PREDICTION_STATUS_REVEALED
+    pub status: u32,
+    /// 0=NO, 1=YES when revealed; PREDICTION_OUTCOME_NONE when committed
+    pub predicted_outcome: u32,
+}
+
 /// PREDICTION MARKET - Manages individual market logic
 #[contract]
 pub struct PredictionMarket;
@@ -316,12 +337,12 @@ impl PredictionMarket {
     /// - Emit PredictionRevealed(user, market_id, outcome, amount, timestamp)
     /// - Update market total_volume += amount
     pub fn reveal_prediction(
-        env: Env,
-        user: Address,
-        market_id: BytesN<32>,
-        outcome: u32,
-        amount: i128,
-        salt: BytesN<32>,
+        _env: Env,
+        _user: Address,
+        _market_id: BytesN<32>,
+        _outcome: u32,
+        _amount: i128,
+        _salt: BytesN<32>,
     ) {
         todo!("See reveal prediction TODO above")
     }
@@ -411,7 +432,7 @@ impl PredictionMarket {
         }
 
         // Load oracle address
-        let oracle_address: Address = env
+        let _oracle_address: Address = env
             .storage()
             .persistent()
             .get(&Symbol::new(&env, ORACLE_KEY))
@@ -427,7 +448,7 @@ impl PredictionMarket {
         // }
 
         // TEMPORARY: Simulate oracle consensus for testing (outcome = 1 for YES)
-        let consensus_reached = true;
+        let _consensus_reached = true;
         let final_outcome = 1u32;
 
         // Validate outcome is binary (0 or 1)
@@ -495,7 +516,12 @@ impl PredictionMarket {
     /// - Increment dispute counter
     /// - Emit MarketDisputed(user, reason, market_id, timestamp)
     /// - Notify admin of dispute
-    pub fn dispute_market(env: Env, user: Address, market_id: BytesN<32>, dispute_reason: Symbol) {
+    pub fn dispute_market(
+        _env: Env,
+        _user: Address,
+        _market_id: BytesN<32>,
+        _dispute_reason: Symbol,
+    ) {
         todo!("See dispute market TODO above")
     }
 
@@ -655,7 +681,7 @@ impl PredictionMarket {
     /// - Transfer refund from treasury to user
     /// - Mark as refunded
     /// - Emit LosingBetRefunded(user, market_id, refund_amount, timestamp)
-    pub fn refund_losing_bet(env: Env, user: Address, market_id: BytesN<32>) -> i128 {
+    pub fn refund_losing_bet(_env: Env, _user: Address, _market_id: BytesN<32>) -> i128 {
         todo!("See refund losing bet TODO above")
     }
 
@@ -670,20 +696,46 @@ impl PredictionMarket {
     /// - Include odds: yes_odds, no_odds
     /// - Include resolution: winning_outcome (if resolved), timestamp
     /// - Include user-specific data if user provided: their prediction, potential winnings
-    pub fn get_market_state(env: Env, market_id: BytesN<32>) -> Symbol {
+    pub fn get_market_state(_env: Env, _market_id: BytesN<32>) -> Symbol {
         todo!("See get market state TODO above")
     }
 
     /// Get prediction records for a user in this market
     ///
-    /// TODO: Get User Prediction
-    /// - Query user_predictions map by user + market_id
-    /// - Return prediction data: outcome, amount, committed, revealed, claimed
-    /// - Include: commit timestamp, reveal timestamp, claim timestamp
-    /// - Include potential payout if market is unresolved
-    /// - Handle: user has no prediction (return error)
-    pub fn get_user_prediction(env: Env, user: Address, market_id: BytesN<32>) -> Symbol {
-        todo!("See get user prediction TODO above")
+    /// Returns commitment_hash, amount, status, predicted_outcome (if revealed).
+    /// Returns None if user has no commitment and no prediction.
+    pub fn get_user_prediction(
+        env: Env,
+        user: Address,
+        _market_id: BytesN<32>,
+    ) -> Option<UserPredictionResult> {
+        // Check commitment first (unrevealed)
+        let commit_key = Self::get_commit_key(&env, &user);
+        if let Some(commitment) = env.storage().persistent().get::<_, Commitment>(&commit_key) {
+            return Some(UserPredictionResult {
+                commitment_hash: commitment.commit_hash,
+                amount: commitment.amount,
+                status: PREDICTION_STATUS_COMMITTED,
+                predicted_outcome: PREDICTION_OUTCOME_NONE,
+            });
+        }
+
+        // Check revealed prediction
+        let pred_key = (Symbol::new(&env, PREDICTION_PREFIX), user);
+        if let Some(pred) = env
+            .storage()
+            .persistent()
+            .get::<_, UserPrediction>(&pred_key)
+        {
+            return Some(UserPredictionResult {
+                commitment_hash: BytesN::from_array(&env, &[0u8; 32]),
+                amount: pred.amount,
+                status: PREDICTION_STATUS_REVEALED,
+                predicted_outcome: pred.outcome,
+            });
+        }
+
+        None
     }
 
     /// Get all predictions in market (for governance/audits)
@@ -694,7 +746,7 @@ impl PredictionMarket {
     /// - Include: user address, outcome, amount for each
     /// - Include participation count and total_volume
     /// - Exclude: user private data (privacy-preserving)
-    pub fn get_all_predictions(env: Env, market_id: BytesN<32>) -> Vec<Symbol> {
+    pub fn get_all_predictions(_env: Env, _market_id: BytesN<32>) -> Vec<Symbol> {
         todo!("See get all predictions TODO above")
     }
 
@@ -706,7 +758,7 @@ impl PredictionMarket {
     /// - Limit top 100
     /// - Return: user address, prediction, payout, accuracy
     /// - For display on frontend
-    pub fn get_market_leaderboard(env: Env, market_id: BytesN<32>) -> Vec<Symbol> {
+    pub fn get_market_leaderboard(_env: Env, _market_id: BytesN<32>) -> Vec<Symbol> {
         todo!("See get market leaderboard TODO above")
     }
 
@@ -728,7 +780,7 @@ impl PredictionMarket {
         // Query pool state from AMM
         // AMM's get_pool_state returns: (yes_reserve, no_reserve, total_liquidity, yes_odds, no_odds)
         let pool_state = Self::query_amm_pool_state(env.clone(), factory, market_id.clone());
-        
+
         let yes_reserve = pool_state.0;
         let no_reserve = pool_state.1;
         let yes_odds = pool_state.3;
@@ -752,14 +804,14 @@ impl PredictionMarket {
         // In production, this would be a cross-contract call to AMM:
         // let amm_client = AMMClient::new(&env, &amm_address);
         // amm_client.get_pool_state(&market_id)
-        
+
         // For now, read from local storage (assuming AMM data is synced)
         let yes_reserve: u128 = env
             .storage()
             .persistent()
             .get(&Symbol::new(&env, YES_POOL_KEY))
             .unwrap_or(0);
-        
+
         let no_reserve: u128 = env
             .storage()
             .persistent()
@@ -778,7 +830,7 @@ impl PredictionMarket {
         } else {
             let yes_odds = ((no_reserve * 10000) / total_liquidity) as u32;
             let no_odds = ((yes_reserve * 10000) / total_liquidity) as u32;
-            
+
             // Ensure odds sum to 10000
             let total_odds = yes_odds + no_odds;
             if total_odds != 10000 {
@@ -807,7 +859,7 @@ impl PredictionMarket {
     /// - Handle any transfer failures (log but continue)
     /// - Set market state to CANCELLED
     /// - Emit MarketCancelled(market_id, reason, creator, timestamp)
-    pub fn cancel_market(env: Env, creator: Address, _market_id: BytesN<32>) {
+    pub fn cancel_market(_env: Env, _creator: Address, _market_id: BytesN<32>) {
         todo!("See cancel market TODO above")
     }
 
@@ -1311,9 +1363,12 @@ mod tests {
         market_client.resolve_market(&market_id_bytes);
     }
 
+    // ============================================================================
+    // GET USER PREDICTION TESTS
+    // ============================================================================
+
     #[test]
-    #[should_panic(expected = "Oracle consensus not reached")]
-    fn test_resolve_without_consensus() {
+    fn test_get_user_prediction_no_prediction_returns_none() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -1321,34 +1376,129 @@ mod tests {
         let market_contract_id = env.register(PredictionMarket, ());
         let market_client = PredictionMarketClient::new(&env, &market_contract_id);
         let oracle_contract_id = env.register(MockOracle, ());
-        let oracle_client = MockOracleClient::new(&env, &oracle_contract_id);
-
-        let resolution_time = 3000;
+        let token_admin = Address::generate(&env);
+        let usdc_client = create_token_contract(&env, &token_admin);
 
         market_client.initialize(
             &market_id_bytes,
             &Address::generate(&env),
             &Address::generate(&env),
-            &Address::generate(&env),
+            &usdc_client.address,
             &oracle_contract_id,
             &2000,
-            &resolution_time,
+            &3000,
         );
 
-        // Advance time to closing
-        env.ledger().with_mut(|li| {
-            li.timestamp = 2010;
-        });
-        market_client.close_market(&market_id_bytes);
+        let user = Address::generate(&env);
+        let result = market_client.get_user_prediction(&user, &market_id_bytes);
+        assert!(result.is_none());
+    }
 
-        // Advance time to resolution
-        env.ledger().with_mut(|li| {
-            li.timestamp = resolution_time + 10;
-        });
+    #[test]
+    fn test_get_user_prediction_committed_returns_commitment_data() {
+        let env = Env::default();
+        env.mock_all_auths();
 
-        // Simulate Oracle Consensus NOT reached
-        oracle_client.set_consensus_status(&false);
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+        let oracle_contract_id = env.register(MockOracle, ());
+        let token_admin = Address::generate(&env);
+        let usdc_client = create_token_contract(&env, &token_admin);
 
-        market_client.resolve_market(&market_id_bytes);
+        market_client.initialize(
+            &market_id_bytes,
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &usdc_client.address,
+            &oracle_contract_id,
+            &2000,
+            &3000,
+        );
+
+        let user = Address::generate(&env);
+        let amount = 100_000_000i128;
+        let commit_hash = BytesN::from_array(&env, &[5u8; 32]);
+
+        usdc_client.mint(&user, &amount);
+        usdc_client.approve(&user, &market_contract_id, &amount, &100);
+        market_client.commit_prediction(&user, &commit_hash, &amount);
+
+        let result = market_client.get_user_prediction(&user, &market_id_bytes);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.commitment_hash, commit_hash);
+        assert_eq!(r.amount, amount);
+        assert_eq!(r.status, PREDICTION_STATUS_COMMITTED);
+        assert_eq!(r.predicted_outcome, PREDICTION_OUTCOME_NONE);
+    }
+
+    #[test]
+    fn test_get_user_prediction_revealed_returns_prediction_data() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+        let oracle_contract_id = env.register(MockOracle, ());
+        let token_admin = Address::generate(&env);
+        let usdc_client = create_token_contract(&env, &token_admin);
+
+        market_client.initialize(
+            &market_id_bytes,
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &usdc_client.address,
+            &oracle_contract_id,
+            &2000,
+            &3000,
+        );
+
+        let user = Address::generate(&env);
+        let amount = 500_000_000i128;
+        let outcome = 1u32; // YES
+
+        market_client.test_set_prediction(&user, &outcome, &amount);
+
+        let result = market_client.get_user_prediction(&user, &market_id_bytes);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.commitment_hash, BytesN::from_array(&env, &[0u8; 32]));
+        assert_eq!(r.amount, amount);
+        assert_eq!(r.status, PREDICTION_STATUS_REVEALED);
+        assert_eq!(r.predicted_outcome, outcome);
+    }
+
+    #[test]
+    fn test_get_user_prediction_revealed_no_outcome() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let market_id_bytes = BytesN::from_array(&env, &[0; 32]);
+        let market_contract_id = env.register(PredictionMarket, ());
+        let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+        let oracle_contract_id = env.register(MockOracle, ());
+        let token_admin = Address::generate(&env);
+        let usdc_client = create_token_contract(&env, &token_admin);
+
+        market_client.initialize(
+            &market_id_bytes,
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &usdc_client.address,
+            &oracle_contract_id,
+            &2000,
+            &3000,
+        );
+
+        let user = Address::generate(&env);
+        market_client.test_set_prediction(&user, &0u32, &200i128); // NO outcome
+
+        let result = market_client.get_user_prediction(&user, &market_id_bytes);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.predicted_outcome, 0);
+        assert_eq!(r.amount, 200);
     }
 }

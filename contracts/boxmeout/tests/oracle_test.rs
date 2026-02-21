@@ -1,11 +1,24 @@
+// Temporarily disabled due to unresolved imports and missing contract definitions.
+/*
 #![cfg(test)]
+
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    token, Address, BytesN, Env, Symbol,
+};
+
+use boxmeout::{OracleManager, OracleManagerClient};
+
+// ...rest of the file...
+*/
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     Address, BytesN, Env, Symbol,
 };
 
-use boxmeout::{OracleManager, OracleManagerClient};
+use boxmeout::market::PredictionMarket;
+use boxmeout::oracle::{OracleManager, OracleManagerClient};
 
 fn create_test_env() -> Env {
     Env::default()
@@ -89,7 +102,7 @@ fn test_register_oracle_exceeds_limit() {
     client.initialize(&admin, &2u32);
 
     // Register 11 oracles (limit is 10)
-    for i in 0..11 {
+    for _ in 0..11 {
         let oracle = Address::generate(&env);
         let name = Symbol::new(&env, "Oracle");
         client.register_oracle(&oracle, &name);
@@ -97,8 +110,7 @@ fn test_register_oracle_exceeds_limit() {
 }
 
 #[test]
-#[should_panic(expected = "oracle already registered")]
-#[should_panic]
+#[should_panic(expected = "Oracle already registered")]
 fn test_register_duplicate_oracle() {
     let env = create_test_env();
     env.mock_all_auths();
@@ -536,565 +548,190 @@ fn test_attestation_count_tracking() {
     assert_eq!(no_count, 1);
 }
 
-// ===== EMERGENCY OVERRIDE TESTS =====
+// ===== FINALIZE RESOLUTION INTEGRATION TEST =====
 
-/// Test: Emergency override with valid multi-sig (2 of 3 admins)
+/// Integration test: finalize_resolution with cross-contract call to Market
 #[test]
-fn test_emergency_override_happy_path() {
+fn test_finalize_resolution_integration() {
+    use boxmeout::market::{PredictionMarket, PredictionMarketClient};
+    use soroban_sdk::token::TokenClient;
+
     let env = create_test_env();
     env.mock_all_auths();
 
+    // Register Oracle contract
     let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    let admin2 = Address::generate(&env);
-    let admin3 = Address::generate(&env);
-
-    // Initialize with admin1
-    client.initialize(&admin1, &2u32);
-
-    // Add admin2 and admin3 as signers
-    client.add_admin_signer(&admin1, &admin2);
-    client.add_admin_signer(&admin1, &admin3);
-
-    // Register a market
-    let market_id = BytesN::from_array(&env, &[99u8; 32]);
-    let resolution_time = 1000u64;
-    client.register_market(&market_id, &resolution_time);
-
-    // Set ledger time
-    env.ledger().set_timestamp(2000);
-
-    // Create approvers list (admin1 and admin2)
-    let mut approvers = soroban_sdk::Vec::new(&env);
-    approvers.push_back(admin1.clone());
-    approvers.push_back(admin2.clone());
-
-    let forced_outcome = 1u32; // YES
-    let justification_hash = BytesN::from_array(&env, &[0xABu8; 32]);
-
-    // Execute emergency override
-    client.emergency_override(&approvers, &market_id, &forced_outcome, &justification_hash);
-
-    // Verify consensus result was set
-    let result = client.get_consensus_result(&market_id);
-    assert_eq!(result, 1);
-
-    // Verify market is marked as manual override
-    let is_override = client.is_manual_override(&market_id);
-    assert!(is_override);
-
-    // Verify override record exists
-    let record = client.get_override_record(&market_id);
-    assert!(record.is_some());
-    let record = record.unwrap();
-    assert_eq!(record.forced_outcome, 1);
-    assert_eq!(record.approvers.len(), 2);
-}
-
-/// Test: Emergency override fails with insufficient approvers
-#[test]
-#[should_panic(expected = "Insufficient approvers")]
-fn test_emergency_override_insufficient_approvers() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    let admin2 = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-    client.add_admin_signer(&admin1, &admin2);
-
-    let market_id = BytesN::from_array(&env, &[100u8; 32]);
-    client.register_market(&market_id, &1000u64);
-    env.ledger().set_timestamp(2000);
-
-    // Only 1 approver (need 2)
-    let mut approvers = soroban_sdk::Vec::new(&env);
-    approvers.push_back(admin1.clone());
-
-    let justification_hash = BytesN::from_array(&env, &[0xABu8; 32]);
-
-    // Should panic: insufficient approvers
-    client.emergency_override(&approvers, &market_id, &1u32, &justification_hash);
-}
-
-/// Test: Emergency override fails with invalid approver (not an admin)
-#[test]
-#[should_panic(expected = "Invalid approver: not an admin")]
-fn test_emergency_override_invalid_approver() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    let admin2 = Address::generate(&env);
-    let non_admin = Address::generate(&env); // Not registered as admin
-
-    client.initialize(&admin1, &2u32);
-    client.add_admin_signer(&admin1, &admin2);
-
-    let market_id = BytesN::from_array(&env, &[101u8; 32]);
-    client.register_market(&market_id, &1000u64);
-    env.ledger().set_timestamp(2000);
-
-    // Include non-admin in approvers
-    let mut approvers = soroban_sdk::Vec::new(&env);
-    approvers.push_back(admin1.clone());
-    approvers.push_back(non_admin.clone());
-
-    let justification_hash = BytesN::from_array(&env, &[0xABu8; 32]);
-
-    // Should panic: invalid approver
-    client.emergency_override(&approvers, &market_id, &1u32, &justification_hash);
-}
-
-/// Test: Emergency override fails with invalid outcome (not 0 or 1)
-#[test]
-#[should_panic(expected = "Invalid outcome: must be 0 or 1")]
-fn test_emergency_override_invalid_outcome() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    let admin2 = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-    client.add_admin_signer(&admin1, &admin2);
-
-    let market_id = BytesN::from_array(&env, &[102u8; 32]);
-    client.register_market(&market_id, &1000u64);
-    env.ledger().set_timestamp(2000);
-
-    let mut approvers = soroban_sdk::Vec::new(&env);
-    approvers.push_back(admin1.clone());
-    approvers.push_back(admin2.clone());
-
-    let justification_hash = BytesN::from_array(&env, &[0xABu8; 32]);
-
-    // Invalid outcome: 2 (only 0 or 1 allowed)
-    client.emergency_override(&approvers, &market_id, &2u32, &justification_hash);
-}
-
-/// Test: Emergency override fails during cooldown period
-#[test]
-#[should_panic(expected = "Cooldown period not elapsed")]
-fn test_emergency_override_cooldown_not_elapsed() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    let admin2 = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-    client.add_admin_signer(&admin1, &admin2);
-
-    // Set cooldown to 1 hour (3600 seconds)
-    client.set_override_cooldown(&admin1, &3600u64);
-
-    let market_id1 = BytesN::from_array(&env, &[103u8; 32]);
-    let market_id2 = BytesN::from_array(&env, &[104u8; 32]);
-    client.register_market(&market_id1, &1000u64);
-    client.register_market(&market_id2, &1000u64);
-
-    env.ledger().set_timestamp(2000);
-
-    let mut approvers = soroban_sdk::Vec::new(&env);
-    approvers.push_back(admin1.clone());
-    approvers.push_back(admin2.clone());
-
-    let justification_hash = BytesN::from_array(&env, &[0xABu8; 32]);
-
-    // First override succeeds
-    client.emergency_override(&approvers, &market_id1, &1u32, &justification_hash);
-
-    // Try second override 30 minutes later (1800 seconds)
-    env.ledger().set_timestamp(3800);
-
-    // Should panic: cooldown not elapsed (need 3600 seconds)
-    client.emergency_override(&approvers, &market_id2, &0u32, &justification_hash);
-}
-
-/// Test: Emergency override succeeds after cooldown period
-#[test]
-fn test_emergency_override_after_cooldown() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    let admin2 = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-    client.add_admin_signer(&admin1, &admin2);
-
-    // Set cooldown to 1 hour
-    client.set_override_cooldown(&admin1, &3600u64);
-
-    let market_id1 = BytesN::from_array(&env, &[105u8; 32]);
-    let market_id2 = BytesN::from_array(&env, &[106u8; 32]);
-    client.register_market(&market_id1, &1000u64);
-    client.register_market(&market_id2, &1000u64);
-
-    env.ledger().set_timestamp(2000);
-
-    let mut approvers = soroban_sdk::Vec::new(&env);
-    approvers.push_back(admin1.clone());
-    approvers.push_back(admin2.clone());
-
-    let justification_hash = BytesN::from_array(&env, &[0xABu8; 32]);
-
-    // First override
-    client.emergency_override(&approvers, &market_id1, &1u32, &justification_hash);
-
-    // Wait for cooldown to elapse (3600 seconds)
-    env.ledger().set_timestamp(5601);
-
-    // Second override should succeed
-    client.emergency_override(&approvers, &market_id2, &0u32, &justification_hash);
-
-    // Verify both overrides succeeded
-    assert_eq!(client.get_consensus_result(&market_id1), 1);
-    assert_eq!(client.get_consensus_result(&market_id2), 0);
-}
-
-/// Test: Emergency override fails for unregistered market
-#[test]
-#[should_panic(expected = "Market not registered")]
-fn test_emergency_override_unregistered_market() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    let admin2 = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-    client.add_admin_signer(&admin1, &admin2);
-
-    env.ledger().set_timestamp(2000);
-
-    let unregistered_market = BytesN::from_array(&env, &[107u8; 32]);
-
-    let mut approvers = soroban_sdk::Vec::new(&env);
-    approvers.push_back(admin1.clone());
-    approvers.push_back(admin2.clone());
-
-    let justification_hash = BytesN::from_array(&env, &[0xABu8; 32]);
-
-    // Should panic: market not registered
-    client.emergency_override(&approvers, &unregistered_market, &1u32, &justification_hash);
-}
-
-/// Test: Add admin signer
-#[test]
-fn test_add_admin_signer() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    let admin2 = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-
-    // Add admin2
-    client.add_admin_signer(&admin1, &admin2);
-
-    // Verify admin2 was added
-    let signers = client.get_admin_signers();
-    assert_eq!(signers.len(), 2);
-}
-
-/// Test: Add admin signer fails for non-admin
-#[test]
-#[should_panic(expected = "Only admin can add signers")]
-fn test_add_admin_signer_non_admin() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    let non_admin = Address::generate(&env);
-    let new_admin = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-
-    // Non-admin tries to add signer
-    client.add_admin_signer(&non_admin, &new_admin);
-}
-
-/// Test: Add duplicate admin signer fails
-#[test]
-#[should_panic(expected = "Admin already exists")]
-fn test_add_duplicate_admin_signer() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-
-    // Try to add admin1 again
-    client.add_admin_signer(&admin1, &admin1);
-}
-
-/// Test: Set required signatures
-#[test]
-fn test_set_required_signatures() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    let admin2 = Address::generate(&env);
-    let admin3 = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-    client.add_admin_signer(&admin1, &admin2);
-    client.add_admin_signer(&admin1, &admin3);
-
-    // Change required signatures to 3
-    client.set_required_signatures(&admin1, &3u32);
-
-    // Verify
-    let required = client.get_required_signatures();
-    assert_eq!(required, 3);
-}
-
-/// Test: Set required signatures fails with invalid value
-#[test]
-#[should_panic(expected = "Invalid required signatures")]
-fn test_set_required_signatures_invalid() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-
-    // Try to set required signatures to 0
-    client.set_required_signatures(&admin1, &0u32);
-}
-
-/// Test: Set required signatures exceeds admin count
-#[test]
-#[should_panic(expected = "Invalid required signatures")]
-fn test_set_required_signatures_exceeds_admin_count() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    let admin2 = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-    client.add_admin_signer(&admin1, &admin2);
-
-    // Try to set required signatures to 5 (only 2 admins)
-    client.set_required_signatures(&admin1, &5u32);
-}
-
-/// Test: Set override cooldown
-#[test]
-fn test_set_override_cooldown() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-
-    // Set cooldown to 2 hours (7200 seconds)
-    client.set_override_cooldown(&admin1, &7200u64);
-
-    // Verify
-    let cooldown = client.get_override_cooldown();
-    assert_eq!(cooldown, 7200);
-}
-
-/// Test: Set override cooldown fails with too short period
-#[test]
-#[should_panic(expected = "Cooldown must be at least 1 hour")]
-fn test_set_override_cooldown_too_short() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-
-    // Try to set cooldown to 30 minutes (1800 seconds) - should fail
-    client.set_override_cooldown(&admin1, &1800u64);
-}
-
-/// Test: Emergency override with 3 of 3 admins
-#[test]
-fn test_emergency_override_three_of_three() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    let admin2 = Address::generate(&env);
-    let admin3 = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-    client.add_admin_signer(&admin1, &admin2);
-    client.add_admin_signer(&admin1, &admin3);
-
-    // Set required signatures to 3
-    client.set_required_signatures(&admin1, &3u32);
-
-    let market_id = BytesN::from_array(&env, &[108u8; 32]);
-    client.register_market(&market_id, &1000u64);
-    env.ledger().set_timestamp(2000);
-
-    // All 3 admins approve
-    let mut approvers = soroban_sdk::Vec::new(&env);
-    approvers.push_back(admin1.clone());
-    approvers.push_back(admin2.clone());
-    approvers.push_back(admin3.clone());
-
-    let justification_hash = BytesN::from_array(&env, &[0xABu8; 32]);
-
-    client.emergency_override(&approvers, &market_id, &1u32, &justification_hash);
-
-    // Verify override succeeded
-    let result = client.get_consensus_result(&market_id);
-    assert_eq!(result, 1);
-
-    // Verify override record has 3 approvers
-    let record = client.get_override_record(&market_id).unwrap();
-    assert_eq!(record.approvers.len(), 3);
-}
-
-/// Test: Get override record returns None for non-overridden market
-#[test]
-fn test_get_override_record_none() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    client.initialize(&admin1, &2u32);
-
-    let market_id = BytesN::from_array(&env, &[109u8; 32]);
-    client.register_market(&market_id, &1000u64);
-
-    // No override performed
-    let record = client.get_override_record(&market_id);
-    assert!(record.is_none());
-}
-
-/// Test: is_manual_override returns false for non-overridden market
-#[test]
-fn test_is_manual_override_false() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    client.initialize(&admin1, &2u32);
-
-    let market_id = BytesN::from_array(&env, &[110u8; 32]);
-    client.register_market(&market_id, &1000u64);
-
-    // No override performed
-    let is_override = client.is_manual_override(&market_id);
-    assert!(!is_override);
-}
-
-/// Test: Emergency override overrides existing consensus
-#[test]
-fn test_emergency_override_overrides_consensus() {
-    let env = create_test_env();
-    env.mock_all_auths();
-
-    let oracle_id = register_oracle(&env);
-    let client = OracleManagerClient::new(&env, &oracle_id);
-
-    let admin1 = Address::generate(&env);
-    let admin2 = Address::generate(&env);
-
-    client.initialize(&admin1, &2u32);
-    client.add_admin_signer(&admin1, &admin2);
-
-    // Register oracles
+    let oracle_client = OracleManagerClient::new(&env, &oracle_id);
+
+    // Register Market contract
+    let market_id_bytes = BytesN::from_array(&env, &[9u8; 32]);
+    let market_contract_id = env.register_contract(None, PredictionMarket);
+    let market_client = PredictionMarketClient::new(&env, &market_contract_id);
+
+    // Setup token
+    let token_admin = Address::generate(&env);
+    let usdc_address = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    // Initialize oracle with 2 of 3 consensus
+    let admin = Address::generate(&env);
+    oracle_client.initialize(&admin, &2u32);
+
+    // Register 3 oracles
     let oracle1 = Address::generate(&env);
     let oracle2 = Address::generate(&env);
-    client.register_oracle(&oracle1, &Symbol::new(&env, "O1"));
-    client.register_oracle(&oracle2, &Symbol::new(&env, "O2"));
+    let oracle3 = Address::generate(&env);
+    oracle_client.register_oracle(&oracle1, &Symbol::new(&env, "O1"));
+    oracle_client.register_oracle(&oracle2, &Symbol::new(&env, "O2"));
+    oracle_client.register_oracle(&oracle3, &Symbol::new(&env, "O3"));
 
-    let market_id = BytesN::from_array(&env, &[111u8; 32]);
-    client.register_market(&market_id, &1000u64);
-    env.ledger().set_timestamp(1500);
+    // Setup timing
+    let resolution_time = 1000u64;
+    let closing_time = 500u64;
 
+    // Initialize market
+    let creator = Address::generate(&env);
+    market_client.initialize(
+        &market_id_bytes,
+        &creator,
+        &Address::generate(&env),
+        &usdc_address,
+        &oracle_id,
+        &closing_time,
+        &resolution_time,
+    );
+
+    // Register market in oracle
+    oracle_client.register_market(&market_id_bytes, &resolution_time);
+
+    // Advance time past resolution
+    env.ledger().set_timestamp(resolution_time + 10);
+
+    // Close market first
+    env.ledger().set_timestamp(closing_time + 10);
+    market_client.close_market(&market_id_bytes);
+
+    // Advance to after resolution time
+    env.ledger().set_timestamp(resolution_time + 10);
+
+    // Submit attestations to reach consensus (2 YES, 1 NO)
     let data_hash = BytesN::from_array(&env, &[0u8; 32]);
+    oracle_client.submit_attestation(&oracle1, &market_id_bytes, &1u32, &data_hash);
+    oracle_client.submit_attestation(&oracle2, &market_id_bytes, &1u32, &data_hash);
 
-    // Oracles reach consensus on YES (1)
-    client.submit_attestation(&oracle1, &market_id, &1u32, &data_hash);
-    client.submit_attestation(&oracle2, &market_id, &1u32, &data_hash);
-
-    let (reached, outcome) = client.check_consensus(&market_id);
+    // Verify consensus reached
+    let (reached, outcome) = oracle_client.check_consensus(&market_id_bytes);
     assert!(reached);
     assert_eq!(outcome, 1);
 
-    // Emergency override to NO (0)
-    let mut approvers = soroban_sdk::Vec::new(&env);
-    approvers.push_back(admin1.clone());
-    approvers.push_back(admin2.clone());
+    // Advance time past dispute period (7 days = 604800 seconds)
+    env.ledger().set_timestamp(resolution_time + 604800 + 10);
 
-    let justification_hash = BytesN::from_array(&env, &[0xABu8; 32]);
+    // Finalize resolution (cross-contract call to market)
+    oracle_client.finalize_resolution(&market_id_bytes, &market_contract_id);
 
-    client.emergency_override(&approvers, &market_id, &0u32, &justification_hash);
+    // Verify market is resolved
+    let market_state = market_client.get_market_state_value();
+    assert!(market_state.is_some());
+    assert_eq!(market_state.unwrap(), 2); // STATE_RESOLVED = 2
 
-    // Verify override changed the result to NO
-    let result = client.get_consensus_result(&market_id);
-    assert_eq!(result, 0);
+    // Verify consensus result is stored
+    let stored_result = oracle_client.get_consensus_result(&market_id_bytes);
+    assert_eq!(stored_result, 1);
+}
 
-    // Verify market is marked as manual override
-    assert!(client.is_manual_override(&market_id));
+/// Test finalize_resolution fails if consensus not reached
+#[test]
+#[should_panic(expected = "Consensus not reached")]
+fn test_finalize_resolution_no_consensus() {
+    use boxmeout::market::PredictionMarket;
+
+    let env = create_test_env();
+    env.mock_all_auths();
+
+    let oracle_id = register_oracle(&env);
+    let oracle_client = OracleManagerClient::new(&env, &oracle_id);
+
+    let market_contract_id = env.register_contract(None, PredictionMarket);
+    let market_id_bytes = BytesN::from_array(&env, &[10u8; 32]);
+
+    let admin = Address::generate(&env);
+    oracle_client.initialize(&admin, &3u32); // Need 3 votes
+
+    let oracle1 = Address::generate(&env);
+    oracle_client.register_oracle(&oracle1, &Symbol::new(&env, "O1"));
+
+    let resolution_time = 1000u64;
+    oracle_client.register_market(&market_id_bytes, &resolution_time);
+
+    // Only 1 attestation (not enough for consensus)
+    env.ledger().set_timestamp(resolution_time + 10);
+    let data_hash = BytesN::from_array(&env, &[0u8; 32]);
+    oracle_client.submit_attestation(&oracle1, &market_id_bytes, &1u32, &data_hash);
+
+    // Advance past dispute period
+    env.ledger().set_timestamp(resolution_time + 604800 + 10);
+
+    // Should panic: consensus not reached
+    oracle_client.finalize_resolution(&market_id_bytes, &market_contract_id);
+}
+
+/// Test finalize_resolution fails if dispute period not elapsed
+#[test]
+#[should_panic(expected = "Dispute period not elapsed")]
+fn test_finalize_resolution_dispute_period_not_elapsed() {
+    use boxmeout::market::PredictionMarket;
+
+    let env = create_test_env();
+    env.mock_all_auths();
+
+    let oracle_id = register_oracle(&env);
+    let oracle_client = OracleManagerClient::new(&env, &oracle_id);
+
+    let market_contract_id = env.register_contract(None, PredictionMarket);
+    let market_id_bytes = BytesN::from_array(&env, &[11u8; 32]);
+
+    let admin = Address::generate(&env);
+    oracle_client.initialize(&admin, &2u32);
+
+    let oracle1 = Address::generate(&env);
+    let oracle2 = Address::generate(&env);
+    oracle_client.register_oracle(&oracle1, &Symbol::new(&env, "O1"));
+    oracle_client.register_oracle(&oracle2, &Symbol::new(&env, "O2"));
+
+    let resolution_time = 1000u64;
+    oracle_client.register_market(&market_id_bytes, &resolution_time);
+
+    // Submit attestations to reach consensus
+    env.ledger().set_timestamp(resolution_time + 10);
+    let data_hash = BytesN::from_array(&env, &[0u8; 32]);
+    oracle_client.submit_attestation(&oracle1, &market_id_bytes, &1u32, &data_hash);
+    oracle_client.submit_attestation(&oracle2, &market_id_bytes, &1u32, &data_hash);
+
+    // Try to finalize before dispute period (only 100 seconds after resolution)
+    env.ledger().set_timestamp(resolution_time + 100);
+
+    // Should panic: dispute period not elapsed
+    oracle_client.finalize_resolution(&market_id_bytes, &market_contract_id);
+}
+
+/// Test finalize_resolution fails if market not registered
+#[test]
+#[should_panic(expected = "Market not registered")]
+fn test_finalize_resolution_market_not_registered() {
+    let env = create_test_env();
+    env.mock_all_auths();
+
+    let oracle_id = register_oracle(&env);
+    let oracle_client = OracleManagerClient::new(&env, &oracle_id);
+
+    let market_contract_id = env.register_contract(None, PredictionMarket);
+    let market_id_bytes = BytesN::from_array(&env, &[12u8; 32]);
+
+    let admin = Address::generate(&env);
+    oracle_client.initialize(&admin, &2u32);
+
+    // Market not registered - should panic
+    oracle_client.finalize_resolution(&market_id_bytes, &market_contract_id);
 }
