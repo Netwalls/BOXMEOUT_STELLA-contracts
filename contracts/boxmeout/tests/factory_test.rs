@@ -73,11 +73,11 @@ fn test_create_market() {
 
     // Initialize factory
     let admin = Address::generate(&env);
-    let usdc = create_mock_token(&env, &admin);
+    let usdc = Address::generate(&env);
     let treasury = Address::generate(&env);
-    env.mock_all_auths();
     client.initialize(&admin, &usdc, &treasury);
 
+    // TODO: Implement when create_market is ready
     // Create market
     let creator = Address::generate(&env);
 
@@ -109,7 +109,7 @@ fn test_create_market() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "invalid timestamps")]
 fn test_create_market_invalid_timestamps() {
     let env = create_test_env();
     let factory_id = register_factory(&env);
