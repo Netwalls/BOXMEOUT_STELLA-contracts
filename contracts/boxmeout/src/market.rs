@@ -1959,7 +1959,8 @@ mod tests {
             li.timestamp = 2001; // Past closing_time (2000)
         });
 
-        let result = market_client.try_reveal_prediction(&user, &market_id, &outcome, &amount, &salt);
+        let result =
+            market_client.try_reveal_prediction(&user, &market_id, &outcome, &amount, &salt);
         assert!(result.is_err());
     }
 
@@ -2016,7 +2017,8 @@ mod tests {
         market_client.test_set_prediction(&user3, &outcome, &amount);
 
         // Now try to reveal - should fail with DuplicateReveal
-        let result = market_client.try_reveal_prediction(&user3, &market_id, &outcome, &amount, &salt3);
+        let result =
+            market_client.try_reveal_prediction(&user3, &market_id, &outcome, &amount, &salt3);
         assert!(result.is_err());
     }
 
@@ -2033,7 +2035,8 @@ mod tests {
             li.timestamp = 1000;
         });
 
-        let result = market_client.try_reveal_prediction(&user, &market_id, &outcome, &amount, &salt);
+        let result =
+            market_client.try_reveal_prediction(&user, &market_id, &outcome, &amount, &salt);
         assert!(result.is_err());
     }
 
@@ -2099,7 +2102,8 @@ mod tests {
         market_client.close_market(&market_id);
 
         // Try to reveal on closed market - should fail
-        let result = market_client.try_reveal_prediction(&user, &market_id, &outcome, &amount, &salt);
+        let result =
+            market_client.try_reveal_prediction(&user, &market_id, &outcome, &amount, &salt);
         assert!(result.is_err());
     }
 
@@ -2134,10 +2138,9 @@ mod tests {
 
         // Step 4: Setup resolution (simulate oracle)
         market_client.test_setup_resolution(
-            &market_id,
-            &1u32,         // YES wins
-            &1000i128,     // winner shares
-            &0i128,        // loser shares
+            &market_id, &1u32,     // YES wins
+            &1000i128, // winner shares
+            &0i128,    // loser shares
         );
 
         // Mint tokens to contract to cover payout
