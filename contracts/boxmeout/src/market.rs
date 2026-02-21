@@ -998,7 +998,7 @@ impl PredictionMarket {
         }
 
         // 3. Get winning outcome and pool information
-        let winning_outcome: u32 = env
+        let _winning_outcome: u32 = env
             .storage()
             .persistent()
             .get(&Symbol::new(&env, WINNING_OUTCOME_KEY))
@@ -1016,7 +1016,7 @@ impl PredictionMarket {
             .get(&Symbol::new(&env, LOSER_SHARES_KEY))
             .unwrap_or(0);
 
-        let total_pool = winner_shares + loser_shares;
+        let _total_pool = winner_shares + loser_shares;
 
         // 4. Handle edge case: no winners
         if winner_shares == 0 {
@@ -1303,7 +1303,7 @@ impl PredictionMarket {
 
     /// Test helper: Get top winners with manual winner list
     /// This helper allows tests to provide a list of winners to populate the function
-    pub fn test_get_market_leaderboard_with_users(
+    pub fn test_get_leaderboard_with_users(
         env: Env,
         _market_id: BytesN<32>,
         limit: u32,
@@ -2131,7 +2131,7 @@ mod market_leaderboard_tests {
         users.push_back(user3.clone());
 
         let winners =
-            market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &10, &users);
+            market_client.test_get_leaderboard_with_users(&market_id_bytes, &10, &users);
 
         assert_eq!(winners.len(), 3);
 
@@ -2188,7 +2188,7 @@ mod market_leaderboard_tests {
 
         // Request only top 2
         let winners =
-            market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &2, &users);
+            market_client.test_get_leaderboard_with_users(&market_id_bytes, &2, &users);
 
         assert_eq!(winners.len(), 2);
 
@@ -2228,7 +2228,7 @@ mod market_leaderboard_tests {
 
         let users = Vec::new(&env);
         let winners =
-            market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &0, &users);
+            market_client.test_get_leaderboard_with_users(&market_id_bytes, &0, &users);
 
         assert_eq!(winners.len(), 0);
     }
@@ -2261,7 +2261,7 @@ mod market_leaderboard_tests {
 
         let users = Vec::new(&env);
         let winners =
-            market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &10, &users);
+            market_client.test_get_leaderboard_with_users(&market_id_bytes, &10, &users);
 
         assert_eq!(winners.len(), 0);
     }
@@ -2292,7 +2292,7 @@ mod market_leaderboard_tests {
 
         // Market is still OPEN (not resolved)
         let users = Vec::new(&env);
-        market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &10, &users);
+        market_client.test_get_leaderboard_with_users(&market_id_bytes, &10, &users);
     }
 
     #[test]
@@ -2335,7 +2335,7 @@ mod market_leaderboard_tests {
         users.push_back(winner2.clone());
 
         let winners =
-            market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &10, &users);
+            market_client.test_get_leaderboard_with_users(&market_id_bytes, &10, &users);
 
         // Should only return 2 winners (loser filtered out)
         assert_eq!(winners.len(), 2);
@@ -2387,7 +2387,7 @@ mod market_leaderboard_tests {
         users.push_back(user3.clone());
 
         let winners =
-            market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &10, &users);
+            market_client.test_get_leaderboard_with_users(&market_id_bytes, &10, &users);
 
         assert_eq!(winners.len(), 3);
 
@@ -2440,7 +2440,7 @@ mod market_leaderboard_tests {
 
         // Request 100 but only 2 winners exist
         let winners =
-            market_client.test_get_market_leaderboard_with_users(&market_id_bytes, &100, &users);
+            market_client.test_get_leaderboard_with_users(&market_id_bytes, &100, &users);
 
         assert_eq!(winners.len(), 2);
     }
