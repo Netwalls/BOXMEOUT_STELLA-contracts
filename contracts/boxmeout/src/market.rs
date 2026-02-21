@@ -44,6 +44,15 @@ pub struct WinningsClaimedEvent {
 }
 
 #[contractevent]
+pub struct PredictionRevealedEvent {
+    pub user: Address,
+    pub market_id: BytesN<32>,
+    pub outcome: u32,
+    pub amount: i128,
+    pub timestamp: u64,
+}
+
+#[contractevent]
 pub struct MarketDisputedEvent {
     pub user: Address,
     pub reason: Symbol,
@@ -429,14 +438,147 @@ impl PredictionMarket {
     /// - `InvalidReveal` - Reconstructed hash doesn't match stored commit hash
     /// - `InvalidAmount` - Revealed amount doesn't match committed amount
     pub fn reveal_prediction(
-        _env: Env,
-        _user: Address,
-        _market_id: BytesN<32>,
-        _outcome: u32,
-        _amount: i128,
-        _salt: BytesN<32>,
-    ) {
-        todo!("See reveal prediction TODO above")
+        env: Env,
+        user: Address,
+        market_id: BytesN<32>,
+        outcome: u32,
+        amount: i128,
+        salt: BytesN<32>,
+    ) -> Result<(), MarketError> {
+        // 1. Require user authentication
+        user.require_auth();
+
+        // 2. Validate market is initialized and in OPEN state
+        let market_state: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, MARKET_STATE_KEY))
+            .ok_or(MarketError::NotInitialized)?;
+
+        if market_state != STATE_OPEN {
+            return Err(MarketError::InvalidMarketState);
+        }
+
+        // 3. Validate current timestamp < closing_time
+        let closing_time: u64 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, CLOSING_TIME_KEY))
+            .ok_or(MarketError::NotInitialized)?;
+
+        let current_time = env.ledger().timestamp();
+        if current_time >= closing_time {
+            return Err(MarketError::MarketClosed);
+        }
+
+        // 4. Check for duplicate reveal (prediction record already exists)
+        let prediction_key = Self::get_prediction_key(&env, &user);
+        if env.storage().persistent().has(&prediction_key) {
+            return Err(MarketError::DuplicateReveal);
+        }
+
+        // 5. Validate user has a prior commitment
+        let commit_key = Self::get_commit_key(&env, &user);
+        let commitment: Commitment = env
+            .storage()
+            .persistent()
+            .get(&commit_key)
+            .ok_or(MarketError::NoPrediction)?;
+
+        // 6. Validate the revealed amount matches the committed amount
+        if amount != commitment.amount {
+            return Err(MarketError::InvalidAmount);
+        }
+
+        // 7. Reconstruct commitment hash from revealed data: sha256(market_id + outcome + salt)
+        //    The user address is implicitly bound via the per-user commit storage key,
+        //    so it doesn't need to be included in the hash preimage.
+        let mut preimage = soroban_sdk::Bytes::new(&env);
+        preimage.extend_from_array(&market_id.to_array());
+        preimage.extend_from_array(&outcome.to_be_bytes());
+        preimage.extend_from_array(&salt.to_array());
+
+        let reconstructed_hash = env.crypto().sha256(&preimage);
+
+        // 8. Compare reconstructed hash with stored commit hash (convert Hash<32> -> BytesN<32>)
+        let reconstructed_bytes = BytesN::from_array(&env, &reconstructed_hash.to_array());
+        if reconstructed_bytes != commitment.commit_hash {
+            return Err(MarketError::InvalidReveal);
+        }
+
+        // 9. Store revealed prediction record
+        let prediction = UserPrediction {
+            user: user.clone(),
+            outcome,
+            amount,
+            claimed: false,
+            timestamp: current_time,
+        };
+        env.storage().persistent().set(&prediction_key, &prediction);
+
+        // 10. Update prediction pools
+        if outcome == 1 {
+            // YES outcome
+            let yes_pool: i128 = env
+                .storage()
+                .persistent()
+                .get(&Symbol::new(&env, YES_POOL_KEY))
+                .unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&Symbol::new(&env, YES_POOL_KEY), &(yes_pool + amount));
+        } else {
+            // NO outcome
+            let no_pool: i128 = env
+                .storage()
+                .persistent()
+                .get(&Symbol::new(&env, NO_POOL_KEY))
+                .unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&Symbol::new(&env, NO_POOL_KEY), &(no_pool + amount));
+        }
+
+        // 11. Update total volume
+        let total_volume: i128 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, TOTAL_VOLUME_KEY))
+            .unwrap_or(0);
+        env.storage().persistent().set(
+            &Symbol::new(&env, TOTAL_VOLUME_KEY),
+            &(total_volume + amount),
+        );
+
+        // 12. Decrement pending count
+        let pending_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, PENDING_COUNT_KEY))
+            .unwrap_or(0);
+        let new_pending = if pending_count > 0 {
+            pending_count - 1
+        } else {
+            0
+        };
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, PENDING_COUNT_KEY), &new_pending);
+
+        // 13. Remove commitment record (prevents re-reveal)
+        env.storage().persistent().remove(&commit_key);
+
+        // 14. Emit PredictionRevealed event with anonymized data
+        PredictionRevealedEvent {
+            user,
+            market_id,
+            outcome,
+            amount,
+            timestamp: current_time,
+        }
+        .publish(&env);
+
+        Ok(())
     }
 
     /// Close market for new predictions (auto-trigger at closing_time)
