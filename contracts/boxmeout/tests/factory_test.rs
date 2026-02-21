@@ -17,7 +17,7 @@ fn create_test_env() -> Env {
 
 // Helper to register factory contract
 fn register_factory(env: &Env) -> Address {
-    env.register_contract(None, MarketFactory)
+    env.register(MarketFactory, ())
 }
 
 // Helper to create a mock USDC token
@@ -253,10 +253,7 @@ fn test_update_treasury_address() {
 }
 */
 
-use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    token, Address, BytesN, Env, Symbol,
-};
+use soroban_sdk::{testutils::Address as _, Address, Env, Symbol};
 
 // Import the Factory contract
 use boxmeout::factory::{MarketFactory, MarketFactoryClient};
@@ -267,7 +264,7 @@ fn create_test_env() -> Env {
 
 // Helper to register factory contract
 fn register_factory(env: &Env) -> Address {
-    env.register_contract(None, MarketFactory)
+    env.register(MarketFactory, ())
 }
 
 // Helper to create a mock USDC token
