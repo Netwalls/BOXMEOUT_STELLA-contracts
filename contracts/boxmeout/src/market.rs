@@ -728,7 +728,6 @@ impl PredictionMarket {
         // Query pool state from AMM
         // AMM's get_pool_state returns: (yes_reserve, no_reserve, total_liquidity, yes_odds, no_odds)
         let pool_state = Self::query_amm_pool_state(env.clone(), factory, market_id.clone());
-        
         let yes_reserve = pool_state.0;
         let no_reserve = pool_state.1;
         let yes_odds = pool_state.3;
@@ -752,14 +751,12 @@ impl PredictionMarket {
         // In production, this would be a cross-contract call to AMM:
         // let amm_client = AMMClient::new(&env, &amm_address);
         // amm_client.get_pool_state(&market_id)
-        
         // For now, read from local storage (assuming AMM data is synced)
         let yes_reserve: u128 = env
             .storage()
             .persistent()
             .get(&Symbol::new(&env, YES_POOL_KEY))
             .unwrap_or(0);
-        
         let no_reserve: u128 = env
             .storage()
             .persistent()
@@ -778,7 +775,6 @@ impl PredictionMarket {
         } else {
             let yes_odds = ((no_reserve * 10000) / total_liquidity) as u32;
             let no_odds = ((yes_reserve * 10000) / total_liquidity) as u32;
-            
             // Ensure odds sum to 10000
             let total_odds = yes_odds + no_odds;
             if total_odds != 10000 {
