@@ -157,6 +157,22 @@ pub struct UserPredictionResult {
     pub predicted_outcome: u32,
 }
 
+/// Market state summary for backend sync
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketState {
+    /// Current market status: 0=OPEN, 1=CLOSED, 2=RESOLVED
+    pub status: u32,
+    /// Market closing timestamp
+    pub closing_time: u64,
+    /// Total pool size (yes_pool + no_pool)
+    pub total_pool: i128,
+    /// Number of participants (pending + revealed predictions)
+    pub participant_count: u32,
+    /// Winning outcome (0=NO, 1=YES), None if not resolved
+    pub winning_outcome: Option<u32>,
+}
+
 /// PREDICTION MARKET - Manages individual market logic
 #[contract]
 pub struct PredictionMarket;
@@ -820,17 +836,68 @@ impl PredictionMarket {
 
     /// Get market summary data
     ///
-    /// TODO: Get Market State
-    /// - Query market metadata from storage
-    /// - Return: market_id, creator, category, title, description
-    /// - Include timing: creation_time, closing_time, resolution_time, time_remaining
-    /// - Include current state: OPEN/CLOSED/RESOLVED/DISPUTED
-    /// - Include pools: yes_volume, no_volume, total_volume
-    /// - Include odds: yes_odds, no_odds
-    /// - Include resolution: winning_outcome (if resolved), timestamp
-    /// - Include user-specific data if user provided: their prediction, potential winnings
-    pub fn get_market_state(_env: Env, _market_id: BytesN<32>) -> Symbol {
-        todo!("See get market state TODO above")
+    /// Returns current market state including status, timing, pool size, and resolution data.
+    /// This is a read-only function that requires no authentication.
+    ///
+    /// # Returns
+    /// - status: Current market state (0=OPEN, 1=CLOSED, 2=RESOLVED)
+    /// - closing_time: When the market closes for new predictions
+    /// - total_pool: Combined size of yes_pool + no_pool
+    /// - participant_count: Number of pending commitments
+    /// - winning_outcome: Final outcome if resolved (0=NO, 1=YES), None otherwise
+    pub fn get_market_state(env: Env, _market_id: BytesN<32>) -> MarketState {
+        // Get market status
+        let status: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, MARKET_STATE_KEY))
+            .unwrap_or(STATE_OPEN);
+
+        // Get closing time
+        let closing_time: u64 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, CLOSING_TIME_KEY))
+            .unwrap_or(0);
+
+        // Get pool sizes
+        let yes_pool: i128 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, YES_POOL_KEY))
+            .unwrap_or(0);
+
+        let no_pool: i128 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, NO_POOL_KEY))
+            .unwrap_or(0);
+
+        let total_pool = yes_pool + no_pool;
+
+        // Get participant count (pending commitments)
+        let participant_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, PENDING_COUNT_KEY))
+            .unwrap_or(0);
+
+        // Get winning outcome if market is resolved
+        let winning_outcome: Option<u32> = if status == STATE_RESOLVED {
+            env.storage()
+                .persistent()
+                .get(&Symbol::new(&env, WINNING_OUTCOME_KEY))
+        } else {
+            None
+        };
+
+        MarketState {
+            status,
+            closing_time,
+            total_pool,
+            participant_count,
+            winning_outcome,
+        }
     }
 
     /// Get prediction records for a user in this market

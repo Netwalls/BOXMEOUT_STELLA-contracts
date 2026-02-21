@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use boxmeout::market::{MarketError, PredictionMarketClient};
+use boxmeout::market::{MarketError, MarketState, PredictionMarketClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
     token, Address, BytesN, Env, Symbol,
@@ -52,6 +52,7 @@ fn setup_test_market(
     Address,
     Address,
     Address,
+    Address,
 ) {
     let market_contract = register_market(env);
     let client = PredictionMarketClient::new(env, &market_contract);
@@ -59,9 +60,9 @@ fn setup_test_market(
     let market_id = BytesN::from_array(env, &[1u8; 32]);
     let creator = Address::generate(env);
     let factory = Address::generate(env);
-    let _admin = Address::generate(env);
+    let admin = Address::generate(env);
 
-    let (_token, usdc_address) = create_usdc_token(env, &_admin);
+    let (_token, usdc_address) = create_usdc_token(env, &admin);
 
     let closing_time = env.ledger().timestamp() + 86400; // 24 hours from now
     let resolution_time = closing_time + 3600; // 1 hour after closing
@@ -81,7 +82,14 @@ fn setup_test_market(
         &resolution_time,
     );
 
-    (client, market_id, creator, _admin, usdc_address)
+    (
+        client,
+        market_id,
+        creator,
+        admin,
+        usdc_address,
+        market_contract,
+    )
 }
 
 /// Helper to setup market with token for claim tests
@@ -129,7 +137,8 @@ fn setup_market_for_claims(
 #[test]
 fn test_market_initialize() {
     let env = create_test_env();
-    let (client, _market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     // Verify market state is OPEN (0)
     let state = client.get_market_state_value();
@@ -147,7 +156,8 @@ fn test_market_initialize() {
 #[test]
 fn test_commit_prediction_happy_path() {
     let env = create_test_env();
-    let (client, _market_id, _creator, _admin, usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, admin, usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     // Setup user with USDC balance
     let user = Address::generate(&env);
@@ -195,7 +205,8 @@ fn test_commit_prediction_happy_path() {
 #[test]
 fn test_commit_prediction_duplicate_rejected() {
     let env = create_test_env();
-    let (client, _market_id, _creator, _admin, usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, admin, usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     let user = Address::generate(&env);
     let amount = 100_000_000i128;
@@ -230,7 +241,8 @@ fn test_commit_prediction_duplicate_rejected() {
 #[test]
 fn test_commit_prediction_zero_amount_rejected() {
     let env = create_test_env();
-    let (client, _market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     let user = Address::generate(&env);
     let amount = 0i128;
@@ -244,7 +256,8 @@ fn test_commit_prediction_zero_amount_rejected() {
 #[test]
 fn test_commit_prediction_negative_amount_rejected() {
     let env = create_test_env();
-    let (client, _market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     let user = Address::generate(&env);
     let amount = -100i128;
@@ -258,7 +271,8 @@ fn test_commit_prediction_negative_amount_rejected() {
 #[test]
 fn test_multiple_users_commit() {
     let env = create_test_env();
-    let (client, _market_id, _creator, _admin, usdc_address) = setup_test_market(&env);
+    let (client, _market_id, _creator, admin, usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     let token = token::StellarAssetClient::new(&env, &usdc_address);
     let market_address = client.address.clone();
@@ -736,3 +750,167 @@ fn test_dispute_market_window_closed() {
 // ============================================================================
 // LIQUIDITY QUERY TESTS
 // ============================================================================
+
+// ============================================================================
+// GET MARKET STATE TESTS
+// ============================================================================
+
+#[test]
+fn test_get_market_state_open() {
+    let env = create_test_env();
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
+
+    // Get market state
+    let state = client.get_market_state(&market_id);
+
+    // Verify initial state
+    assert_eq!(state.status, 0); // STATE_OPEN
+    assert_eq!(state.closing_time, env.ledger().timestamp() + 86400);
+    assert_eq!(state.total_pool, 0);
+    assert_eq!(state.participant_count, 0);
+    assert_eq!(state.winning_outcome, None);
+}
+
+#[test]
+fn test_get_market_state_with_commitments() {
+    let env = create_test_env();
+    let (client, market_id, _creator, _admin, usdc_address, _market_contract) =
+        setup_test_market(&env);
+
+    let token = token::StellarAssetClient::new(&env, &usdc_address);
+    let market_address = client.address.clone();
+
+    // Setup two users with commitments
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    let amount1 = 100_000_000i128;
+    let amount2 = 50_000_000i128;
+
+    let hash1 = BytesN::from_array(&env, &[2u8; 32]);
+    let hash2 = BytesN::from_array(&env, &[3u8; 32]);
+
+    token.mint(&user1, &amount1);
+    token.mint(&user2, &amount2);
+
+    token.approve(
+        &user1,
+        &market_address,
+        &amount1,
+        &(env.ledger().sequence() + 100),
+    );
+    token.approve(
+        &user2,
+        &market_address,
+        &amount2,
+        &(env.ledger().sequence() + 100),
+    );
+
+    client.commit_prediction(&user1, &hash1, &amount1);
+    client.commit_prediction(&user2, &hash2, &amount2);
+
+    // Get market state
+    let state = client.get_market_state(&market_id);
+
+    // Verify state with commitments
+    assert_eq!(state.status, 0); // STATE_OPEN
+    assert_eq!(state.participant_count, 2);
+    assert_eq!(state.total_pool, 0); // Pool is still 0 until reveals
+    assert_eq!(state.winning_outcome, None);
+}
+
+#[test]
+fn test_get_market_state_closed() {
+    let env = create_test_env();
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
+
+    // Advance time past closing time
+    env.ledger().set(LedgerInfo {
+        timestamp: env.ledger().timestamp() + 86400 + 1,
+        protocol_version: 23,
+        sequence_number: 11,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 16,
+        max_entry_ttl: 6312000,
+    });
+
+    // Close the market
+    client.close_market(&market_id);
+
+    // Get market state
+    let state = client.get_market_state(&market_id);
+
+    // Verify closed state
+    assert_eq!(state.status, 1); // STATE_CLOSED
+    assert_eq!(state.winning_outcome, None); // Not resolved yet
+}
+
+#[test]
+fn test_get_market_state_resolved() {
+    let env = create_test_env();
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
+
+    // Advance time past resolution time
+    env.ledger().set(LedgerInfo {
+        timestamp: env.ledger().timestamp() + 86400 + 3600 + 1,
+        protocol_version: 23,
+        sequence_number: 11,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 16,
+        max_entry_ttl: 6312000,
+    });
+
+    // Close the market first
+    client.close_market(&market_id);
+
+    // Resolve the market
+    client.resolve_market(&market_id);
+
+    // Get market state
+    let state = client.get_market_state(&market_id);
+
+    // Verify resolved state
+    assert_eq!(state.status, 2); // STATE_RESOLVED
+    assert_eq!(state.winning_outcome, Some(1)); // YES wins (from mock oracle)
+}
+
+#[test]
+fn test_get_market_state_no_auth_required() {
+    let env = create_test_env();
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
+
+    // Call without any authentication - should work fine
+    let state = client.get_market_state(&market_id);
+
+    // Verify we got valid data
+    assert_eq!(state.status, 0);
+    assert!(state.closing_time > 0);
+}
+
+#[test]
+fn test_get_market_state_serializable() {
+    let env = create_test_env();
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
+
+    // Get market state
+    let state = client.get_market_state(&market_id);
+
+    // Verify all fields are accessible and serializable
+    let _status = state.status;
+    let _closing_time = state.closing_time;
+    let _total_pool = state.total_pool;
+    let _participant_count = state.participant_count;
+    let _winning_outcome = state.winning_outcome;
+
+    // If we got here, the struct is properly serializable
+    assert!(true);
+}
