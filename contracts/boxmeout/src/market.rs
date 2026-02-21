@@ -1124,14 +1124,14 @@ impl PredictionMarket {
             .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_CANCELLED);
 
         let timestamp = env.ledger().timestamp();
-        
+
         #[contractevent]
         pub struct MarketCancelledEvent {
             pub market_id: BytesN<32>,
             pub creator: Address,
             pub timestamp: u64,
         }
-        
+
         MarketCancelledEvent {
             market_id,
             creator,

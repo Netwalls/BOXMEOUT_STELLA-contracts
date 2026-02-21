@@ -956,7 +956,7 @@ impl OracleManager {
             pub approvers: Vec<Address>,
             pub timestamp: u64,
         }
-        
+
         EmergencyOverrideEvent {
             market_id,
             forced_outcome,
