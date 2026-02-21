@@ -1,9 +1,9 @@
 #![cfg(test)]
 
-use boxmeout::market::{Commitment, MarketError, PredictionMarket, PredictionMarketClient};
+use boxmeout::market::{MarketError, PredictionMarketClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
-    token, Address, BytesN, Env, Symbol,
+    token, Address, BytesN, Env,
 };
 
 // ...rest of the file...
@@ -47,7 +47,7 @@ fn create_usdc_token<'a>(env: &Env, admin: &Address) -> (token::StellarAssetClie
 fn setup_test_market(
     env: &Env,
 ) -> (
-    PredictionMarketClient,
+    PredictionMarketClient<'_>,
     BytesN<32>,
     Address,
     Address,
@@ -57,9 +57,9 @@ fn setup_test_market(
     let client = PredictionMarketClient::new(env, &market_contract);
 
     let market_id = BytesN::from_array(env, &[1u8; 32]);
-    let creator = Address::generate(env);
+    let _creator = Address::generate(env);
     let factory = Address::generate(env);
-    let admin = Address::generate(env);
+    let _admin = Address::generate(env);
 
     let (_token, usdc_address) = create_usdc_token(env, &admin);
 
@@ -88,17 +88,17 @@ fn setup_test_market(
 fn setup_market_for_claims(
     env: &Env,
 ) -> (
-    PredictionMarketClient,
+    PredictionMarketClient<'_>,
     BytesN<32>,
-    token::StellarAssetClient,
+    token::StellarAssetClient<'_>,
     Address,
 ) {
     let market_contract = register_market(env);
     let client = PredictionMarketClient::new(env, &market_contract);
 
     let market_id = BytesN::from_array(env, &[1u8; 32]);
-    let creator = Address::generate(env);
-    let admin = Address::generate(env);
+    let _creator = Address::generate(env);
+    let _admin = Address::generate(env);
 
     let (token_client, usdc_address) = create_usdc_token(env, &admin);
 
@@ -264,8 +264,8 @@ fn test_multiple_users_commit() {
     let market_address = client.address.clone();
 
     // Setup three users
-    let user1 = Address::generate(&env);
-    let user2 = Address::generate(&env);
+    let _user1 = Address::generate(&env);
+    let _user2 = Address::generate(&env);
     let user3 = Address::generate(&env);
 
     let amount1 = 100_000_000i128;
@@ -444,8 +444,8 @@ fn test_multiple_winners_correct_proportional_payout() {
     let env = create_test_env();
     let (client, market_id, token_client, market_contract) = setup_market_for_claims(&env);
 
-    let user1 = Address::generate(&env);
-    let user2 = Address::generate(&env);
+    let _user1 = Address::generate(&env);
+    let _user2 = Address::generate(&env);
 
     // Total pool: 1000 (winners) + 1000 (losers) = 2000
     // User1 has 600, User2 has 400 of 1000 winner shares
@@ -614,8 +614,8 @@ fn test_all_winners_no_losers() {
     let env = create_test_env();
     let (client, market_id, token_client, market_contract) = setup_market_for_claims(&env);
 
-    let user1 = Address::generate(&env);
-    let user2 = Address::generate(&env);
+    let _user1 = Address::generate(&env);
+    let _user2 = Address::generate(&env);
 
     // Everyone bet on the winner, loser pool = 0
     token_client.mint(&market_contract, &1000);

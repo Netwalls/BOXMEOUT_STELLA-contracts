@@ -2,8 +2,46 @@
 // Handles predictions, bet commitment/reveal, market resolution, and winnings claims
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, token, Address, BytesN,
+    Env, Symbol, Vec,
 };
+
+#[contractevent]
+pub struct MarketInitializedEvent {
+    pub market_id: BytesN<32>,
+    pub creator: Address,
+    pub factory: Address,
+    pub oracle: Address,
+    pub closing_time: u64,
+    pub resolution_time: u64,
+}
+
+#[contractevent]
+pub struct CommitmentMadeEvent {
+    pub user: Address,
+    pub market_id: BytesN<32>,
+    pub amount: i128,
+}
+
+#[contractevent]
+pub struct MarketClosedEvent {
+    pub market_id: BytesN<32>,
+    pub timestamp: u64,
+}
+
+#[contractevent]
+pub struct MarketResolvedEvent {
+    pub market_id: BytesN<32>,
+    pub final_outcome: u32,
+    pub timestamp: u64,
+}
+
+#[contractevent]
+pub struct WinningsClaimedEvent {
+    pub user: Address,
+    pub market_id: BytesN<32>,
+    pub net_payout: i128,
+}
 
 // Storage keys
 const MARKET_ID_KEY: &str = "market_id";
@@ -175,17 +213,15 @@ impl PredictionMarket {
             .set(&Symbol::new(&env, PENDING_COUNT_KEY), &0u32);
 
         // Emit initialization event
-        env.events().publish(
-            (Symbol::new(&env, "market_initialized"),),
-            (
-                market_id,
-                creator,
-                factory,
-                oracle,
-                closing_time,
-                resolution_time,
-            ),
-        );
+        MarketInitializedEvent {
+            market_id,
+            creator,
+            factory,
+            oracle,
+            closing_time,
+            resolution_time,
+        }
+        .publish(&env);
     }
 
     /// Phase 1: User commits to a prediction (commit-reveal scheme for privacy)
@@ -285,10 +321,12 @@ impl PredictionMarket {
             .set(&Symbol::new(&env, PENDING_COUNT_KEY), &(pending_count + 1));
 
         // Emit CommitmentMade event
-        env.events().publish(
-            (Symbol::new(&env, "CommitmentMade"),),
-            (user, market_id, amount),
-        );
+        CommitmentMadeEvent {
+            user,
+            market_id,
+            amount,
+        }
+        .publish(&env);
 
         Ok(())
     }
@@ -382,10 +420,11 @@ impl PredictionMarket {
             .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_CLOSED);
 
         // Emit MarketClosed Event
-        env.events().publish(
-            (Symbol::new(&env, "market_closed"),),
-            (market_id, current_time),
-        );
+        MarketClosedEvent {
+            market_id,
+            timestamp: current_time,
+        }
+        .publish(&env);
     }
 
     /// Resolve market based on oracle consensus result
@@ -498,10 +537,12 @@ impl PredictionMarket {
             .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_RESOLVED);
 
         // Emit MarketResolved event
-        env.events().publish(
-            (Symbol::new(&env, "MarketResolved"),),
-            (market_id, final_outcome, current_time),
-        );
+        MarketResolvedEvent {
+            market_id,
+            final_outcome,
+            timestamp: current_time,
+        }
+        .publish(&env);
     }
 
     /// Dispute market resolution within 7-day window
@@ -661,10 +702,12 @@ impl PredictionMarket {
         env.storage().persistent().set(&prediction_key, &prediction);
 
         // 9. Emit WinningsClaimed Event
-        env.events().publish(
-            (Symbol::new(&env, "WinningsClaimed"),),
-            (user, market_id.clone(), net_payout),
-        );
+        WinningsClaimedEvent {
+            user,
+            market_id: market_id.clone(),
+            net_payout,
+        }
+        .publish(&env);
 
         net_payout
     }
