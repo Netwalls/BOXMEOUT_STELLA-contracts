@@ -76,6 +76,7 @@ const STATE_OPEN: u32 = 0;
 const STATE_CLOSED: u32 = 1;
 const STATE_RESOLVED: u32 = 2;
 const STATE_DISPUTED: u32 = 3;
+const STATE_CANCELLED: u32 = 4;
 
 /// Error codes following Soroban best practices
 #[contracterror]
