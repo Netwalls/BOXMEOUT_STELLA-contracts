@@ -193,6 +193,7 @@ pub struct PredictionMarket;
 #[contractimpl]
 impl PredictionMarket {
     /// Initialize a single market instance
+    #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
         market_id: BytesN<32>,
@@ -1379,10 +1380,20 @@ impl PredictionMarket {
             .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_CANCELLED);
 
         let timestamp = env.ledger().timestamp();
-        env.events().publish(
-            (Symbol::new(&env, "MarketCancelled"),),
-            (market_id, creator, timestamp),
-        );
+
+        #[contractevent]
+        pub struct MarketCancelledEvent {
+            pub market_id: BytesN<32>,
+            pub creator: Address,
+            pub timestamp: u64,
+        }
+
+        MarketCancelledEvent {
+            market_id,
+            creator,
+            timestamp,
+        }
+        .publish(&env);
     }
 
     // --- TEST HELPERS (Not for production use, but exposed for integration tests) ---
