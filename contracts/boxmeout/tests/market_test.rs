@@ -727,14 +727,12 @@ fn test_get_market_liquidity_balanced_pool() {
     let no_reserve = 1_000_000_000u128; // 1000 USDC worth of NO
 
     // Store reserves in market storage (simulating AMM sync)
-    env.storage().persistent().set(
-        &Symbol::new(&env, "yes_pool"),
-        &yes_reserve,
-    );
-    env.storage().persistent().set(
-        &Symbol::new(&env, "no_pool"),
-        &no_reserve,
-    );
+    env.storage()
+        .persistent()
+        .set(&Symbol::new(&env, "yes_pool"), &yes_reserve);
+    env.storage()
+        .persistent()
+        .set(&Symbol::new(&env, "no_pool"), &no_reserve);
 
     // Query liquidity
     let (returned_yes, returned_no, k_constant, yes_odds, no_odds) =
@@ -754,6 +752,7 @@ fn test_get_market_liquidity_balanced_pool() {
 }
 
 #[test]
+#[test]
 fn test_get_market_liquidity_yes_favored() {
     let env = create_test_env();
     let (client, market_id, _creator, _admin, _usdc_address) = setup_test_market(&env);
@@ -762,14 +761,12 @@ fn test_get_market_liquidity_yes_favored() {
     let yes_reserve = 400_000_000u128; // 400 USDC worth of YES
     let no_reserve = 600_000_000u128; // 600 USDC worth of NO
 
-    env.storage().persistent().set(
-        &Symbol::new(&env, "yes_pool"),
-        &yes_reserve,
-    );
-    env.storage().persistent().set(
-        &Symbol::new(&env, "no_pool"),
-        &no_reserve,
-    );
+    env.storage()
+        .persistent()
+        .set(&Symbol::new(&env, "yes_pool"), &yes_reserve);
+    env.storage()
+        .persistent()
+        .set(&Symbol::new(&env, "no_pool"), &no_reserve);
 
     // Query liquidity
     let (returned_yes, returned_no, k_constant, yes_odds, no_odds) =
@@ -790,6 +787,7 @@ fn test_get_market_liquidity_yes_favored() {
     // Verify odds sum to 10000
     assert_eq!(yes_odds + no_odds, 10000);
 }
+
 
 #[test]
 fn test_get_market_liquidity_no_favored() {
