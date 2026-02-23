@@ -2641,10 +2641,7 @@ mod tests {
 #[cfg(test)]
 mod market_leaderboard_tests {
     use super::*;
-    use soroban_sdk::{
-        testutils::Address as _,
-        Address, BytesN, Env, Vec,
-    };
+    use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, Vec};
 
     fn create_token_contract<'a>(env: &Env, admin: &Address) -> token::StellarAssetClient<'a> {
         let token_address = env
