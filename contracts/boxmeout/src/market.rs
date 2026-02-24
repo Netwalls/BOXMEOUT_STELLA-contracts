@@ -60,6 +60,14 @@ pub struct MarketDisputedEvent {
     pub timestamp: u64,
 }
 
+#[contractevent]
+pub struct RefundedEvent {
+    pub user: Address,
+    pub market_id: BytesN<32>,
+    pub amount: i128,
+    pub timestamp: u64,
+}
+
 // Storage keys
 const MARKET_ID_KEY: &str = "market_id";
 const CREATOR_KEY: &str = "creator";
@@ -76,7 +84,7 @@ const PENDING_COUNT_KEY: &str = "pending_count";
 const COMMIT_PREFIX: &str = "commit";
 const PARTICIPANTS_KEY: &str = "participants";
 const PREDICTION_PREFIX: &str = "prediction";
-const REVEALED_PARTICIPANTS_KEY: &str = "revealed_participants";
+const REFUNDED_PREFIX: &str = "refunded";
 const WINNING_OUTCOME_KEY: &str = "winning_outcome";
 const WINNER_SHARES_KEY: &str = "winner_shares";
 const LOSER_SHARES_KEY: &str = "loser_shares";
@@ -420,6 +428,11 @@ impl PredictionMarket {
     /// Helper: Generate storage key for user prediction
     fn get_prediction_key(env: &Env, user: &Address) -> (Symbol, Address) {
         (Symbol::new(env, PREDICTION_PREFIX), user.clone())
+    }
+
+    /// Helper: Storage key for refunded flag (prevents double-refund)
+    fn get_refunded_key(env: &Env, user: &Address) -> (Symbol, Address) {
+        (Symbol::new(env, REFUNDED_PREFIX), user.clone())
     }
 
     /// Helper: Get user commitment (for testing and reveal phase)
@@ -1380,8 +1393,7 @@ impl PredictionMarket {
     ///
     /// - Require creator authentication
     /// - Validate market state is OPEN or CLOSED (not resolved)
-    /// - Refund all participants (commitments and predictions)
-    /// - Set market state to CANCELLED
+    /// - Set market state to CANCELLED; participants claim refunds via claim_refund
     /// - Emit MarketCancelled(market_id, creator, timestamp)
     pub fn cancel_market(env: Env, creator: Address, market_id: BytesN<32>) {
         creator.require_auth();
@@ -1409,43 +1421,7 @@ impl PredictionMarket {
             panic!("Market already cancelled");
         }
 
-        let usdc: Address = env
-            .storage()
-            .persistent()
-            .get(&Symbol::new(&env, USDC_KEY))
-            .expect("USDC token not found");
-        let token_client = token::TokenClient::new(&env, &usdc);
-        let contract = env.current_contract_address();
-
-        let participants: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&Symbol::new(&env, PARTICIPANTS_KEY))
-            .unwrap_or_else(|| Vec::new(&env));
-
-        let len = participants.len();
-        for i in 0..len {
-            let user = participants.get(i).expect("participant");
-            if let Some(commitment) = Self::get_commitment(env.clone(), user.clone()) {
-                if commitment.amount > 0 {
-                    token_client.transfer(&contract, &user, &commitment.amount);
-                }
-                env.storage()
-                    .persistent()
-                    .remove(&Self::get_commit_key(&env, &user));
-            } else if let Some(pred) = Self::test_get_prediction(env.clone(), user.clone()) {
-                if pred.amount > 0 {
-                    token_client.transfer(&contract, &user, &pred.amount);
-                }
-                let pred_key = (Symbol::new(&env, PREDICTION_PREFIX), user.clone());
-                env.storage().persistent().remove(&pred_key);
-            }
-        }
-
-        env.storage().persistent().set(
-            &Symbol::new(&env, PARTICIPANTS_KEY),
-            &Vec::<Address>::new(&env),
-        );
+        // Set state to CANCELLED; participants claim refunds via claim_refund (only callable when CANCELLED)
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_CANCELLED);
@@ -1463,6 +1439,68 @@ impl PredictionMarket {
             market_id,
             creator,
             timestamp,
+        }
+        .publish(&env);
+    }
+
+    /// Refund committed USDC to a participant. Only callable when market is CANCELLED.
+    ///
+    /// - Requires market state is CANCELLED
+    /// - Refunds exact committed/revealed amount (from commitment or prediction)
+    /// - Tracks refund status to prevent double-refunds
+    /// - Emits RefundedEvent
+    pub fn claim_refund(env: Env, user: Address, market_id: BytesN<32>) {
+        user.require_auth();
+
+        let state: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, MARKET_STATE_KEY))
+            .expect("Market not initialized");
+
+        if state != STATE_CANCELLED {
+            panic!("Refunds only available for cancelled markets");
+        }
+
+        let refunded_key = Self::get_refunded_key(&env, &user);
+        if env.storage().persistent().has(&refunded_key) {
+            panic!("Already refunded");
+        }
+
+        let usdc: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, USDC_KEY))
+            .expect("USDC token not found");
+        let token_client = token::TokenClient::new(&env, &usdc);
+        let contract = env.current_contract_address();
+
+        let amount = if let Some(commitment) = Self::get_commitment(env.clone(), user.clone()) {
+            env.storage()
+                .persistent()
+                .remove(&Self::get_commit_key(&env, &user));
+            commitment.amount
+        } else if let Some(pred) = Self::test_get_prediction(env.clone(), user.clone()) {
+            let pred_key = Self::get_prediction_key(&env, &user);
+            env.storage().persistent().remove(&pred_key);
+            pred.amount
+        } else {
+            panic!("No commitment or prediction found for user");
+        };
+
+        if amount <= 0 {
+            panic!("No amount to refund");
+        }
+
+        token_client.transfer(&contract, &user, &amount);
+
+        env.storage().persistent().set(&refunded_key, &true);
+
+        RefundedEvent {
+            user: user.clone(),
+            market_id,
+            amount,
+            timestamp: env.ledger().timestamp(),
         }
         .publish(&env);
     }

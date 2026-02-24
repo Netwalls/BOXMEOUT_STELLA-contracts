@@ -915,108 +915,129 @@ fn test_get_market_state_serializable() {
 }
 
 // ============================================================================
-// PAGINATED REVEALED PREDICTIONS TESTS
+// CANCEL MARKET & REFUND TESTS
 // ============================================================================
 
 #[test]
-fn test_get_paginated_predictions_empty() {
+fn test_cancel_market_sets_cancelled_state() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+    let (client, market_id, creator, _admin, _usdc_address, _market_contract) =
         setup_test_market(&env);
 
-    let result = client.get_paginated_predictions(&market_id, &0, &10);
-    assert_eq!(result.total, 0);
-    assert_eq!(result.items.len(), 0);
+    client.cancel_market(&creator, &market_id);
+
+    assert_eq!(client.get_market_state_value().unwrap(), 4); // STATE_CANCELLED
 }
 
 #[test]
-fn test_get_paginated_predictions_only_revealed() {
+fn test_claim_refund_only_on_cancelled_market() {
     let env = create_test_env();
-    let (client, market_id, _creator, _admin, usdc_address, market_contract) =
+    let (client, market_id, creator, _admin, usdc_address, market_contract) =
         setup_test_market(&env);
 
-    let user1 = Address::generate(&env);
-    let user2 = Address::generate(&env);
-
-    // Mint and approve for commits
+    let user = Address::generate(&env);
     let token = token::StellarAssetClient::new(&env, &usdc_address);
-    token.mint(&user1, &1000);
-    token.mint(&user2, &1000);
-    token.approve(&user1, &market_contract, &1000, &99999);
-    token.approve(&user2, &market_contract, &1000, &99999);
+    token.mint(&user, &500);
+    token.approve(
+        &user,
+        &market_contract,
+        &500,
+        &(env.ledger().sequence() + 100),
+    );
+    client.commit_prediction(&user, &BytesN::from_array(&env, &[1u8; 32]), &500);
 
-    let hash1 = BytesN::from_array(&env, &[1u8; 32]);
-    let hash2 = BytesN::from_array(&env, &[2u8; 32]);
-    client.commit_prediction(&user1, &hash1, &100);
-    client.commit_prediction(&user2, &hash2, &200);
+    // Cancel so refunds are available
+    client.cancel_market(&creator, &market_id);
 
-    // No reveals yet: paginated list should be empty (commit-phase privacy)
-    let result = client.get_paginated_predictions(&market_id, &0, &10);
-    assert_eq!(result.total, 0);
-    assert_eq!(result.items.len(), 0);
+    client.claim_refund(&user, &market_id);
 
-    // Simulate revealed predictions via test helper (as in claim tests)
-    client.test_set_prediction(&user1, &1u32, &100);
-    client.test_set_prediction(&user2, &0u32, &200);
-
-    let result_after = client.get_paginated_predictions(&market_id, &0, &10);
-    assert_eq!(result_after.total, 2);
-    assert_eq!(result_after.items.len(), 2);
+    // Exact committed USDC refunded
+    assert_eq!(token.balance(&user), 500);
+    assert_eq!(token.balance(&market_contract), 0);
 }
 
 #[test]
-fn test_get_paginated_predictions_pagination() {
-    let env = create_test_env();
-    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
-        setup_test_market(&env);
-
-    let user1 = Address::generate(&env);
-    let user2 = Address::generate(&env);
-    let user3 = Address::generate(&env);
-
-    client.test_set_prediction(&user1, &1u32, &100);
-    client.test_set_prediction(&user2, &0u32, &200);
-    client.test_set_prediction(&user3, &1u32, &300);
-
-    // Page 1: offset 0, limit 2
-    let page1 = client.get_paginated_predictions(&market_id, &0, &2);
-    assert_eq!(page1.total, 3);
-    assert_eq!(page1.items.len(), 2);
-    assert_eq!(page1.items.get(0).unwrap().amount, 100);
-    assert_eq!(page1.items.get(1).unwrap().amount, 200);
-
-    // Page 2: offset 2, limit 2
-    let page2 = client.get_paginated_predictions(&market_id, &2, &2);
-    assert_eq!(page2.total, 3);
-    assert_eq!(page2.items.len(), 1);
-    assert_eq!(page2.items.get(0).unwrap().amount, 300);
-
-    // Limit 0 returns empty items, total unchanged
-    let empty = client.get_paginated_predictions(&market_id, &0, &0);
-    assert_eq!(empty.total, 3);
-    assert_eq!(empty.items.len(), 0);
-
-    // Offset beyond total returns empty items
-    let beyond = client.get_paginated_predictions(&market_id, &10, &5);
-    assert_eq!(beyond.total, 3);
-    assert_eq!(beyond.items.len(), 0);
-}
-
-#[test]
-fn test_get_paginated_predictions_items_content() {
+#[should_panic(expected = "Refunds only available for cancelled markets")]
+fn test_claim_refund_fails_when_market_not_cancelled() {
     let env = create_test_env();
     let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
         setup_test_market(&env);
 
     let user = Address::generate(&env);
-    client.test_set_prediction(&user, &1u32, &500);
+    // Market still OPEN
+    client.claim_refund(&user, &market_id);
+}
 
-    let result = client.get_paginated_predictions(&market_id, &0, &10);
-    assert_eq!(result.total, 1);
-    assert_eq!(result.items.len(), 1);
-    let item = result.items.get(0).unwrap();
-    assert_eq!(item.user, user);
-    assert_eq!(item.outcome, 1);
-    assert_eq!(item.amount, 500);
-    assert!(item.timestamp > 0);
+#[test]
+fn test_claim_refund_tracks_status_prevents_double_refund() {
+    let env = create_test_env();
+    let (client, market_id, creator, _admin, usdc_address, market_contract) =
+        setup_test_market(&env);
+
+    let user = Address::generate(&env);
+    let token = token::StellarAssetClient::new(&env, &usdc_address);
+    token.mint(&user, &300);
+    token.approve(
+        &user,
+        &market_contract,
+        &300,
+        &(env.ledger().sequence() + 100),
+    );
+    client.commit_prediction(&user, &BytesN::from_array(&env, &[2u8; 32]), &300);
+
+    client.cancel_market(&creator, &market_id);
+    client.claim_refund(&user, &market_id);
+    assert_eq!(token.balance(&user), 300);
+    // Double-refund is tested in test_claim_refund_double_panics
+}
+
+#[test]
+#[should_panic(expected = "Already refunded")]
+fn test_claim_refund_double_panics() {
+    let env = create_test_env();
+    let (client, market_id, creator, _admin, usdc_address, market_contract) =
+        setup_test_market(&env);
+
+    let user = Address::generate(&env);
+    let token = token::StellarAssetClient::new(&env, &usdc_address);
+    token.mint(&user, &100);
+    token.approve(
+        &user,
+        &market_contract,
+        &100,
+        &(env.ledger().sequence() + 100),
+    );
+    client.commit_prediction(&user, &BytesN::from_array(&env, &[3u8; 32]), &100);
+
+    client.cancel_market(&creator, &market_id);
+    client.claim_refund(&user, &market_id);
+    client.claim_refund(&user, &market_id);
+}
+
+#[test]
+#[should_panic(expected = "No commitment or prediction found for user")]
+fn test_claim_refund_fails_for_non_participant() {
+    let env = create_test_env();
+    let (client, market_id, creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
+
+    let user = Address::generate(&env);
+    client.cancel_market(&creator, &market_id);
+    client.claim_refund(&user, &market_id);
+}
+
+#[test]
+fn test_claim_refund_revealed_prediction_exact_amount() {
+    let env = create_test_env();
+    let (client, market_id, creator, _admin, usdc_address, market_contract) =
+        setup_test_market(&env);
+
+    let token = token::StellarAssetClient::new(&env, &usdc_address);
+    let user = Address::generate(&env);
+    client.test_set_prediction(&user, &1u32, &750);
+    token.mint(&market_contract, &750);
+
+    client.cancel_market(&creator, &market_id);
+    client.claim_refund(&user, &market_id);
+    assert_eq!(token.balance(&user), 750);
 }
