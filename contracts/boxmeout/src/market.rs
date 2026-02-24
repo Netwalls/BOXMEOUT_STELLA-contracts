@@ -1140,7 +1140,7 @@ impl PredictionMarket {
             .get(&Symbol::new(&env, REVEALED_PARTICIPANTS_KEY))
             .unwrap_or_else(|| Vec::new(&env));
 
-        let total = revealed.len() as u32;
+        let total = revealed.len();
         let mut items = Vec::new(&env);
 
         if limit == 0 {
@@ -1153,7 +1153,11 @@ impl PredictionMarket {
         for i in start..end {
             let user = revealed.get(i).unwrap();
             let pred_key = Self::get_prediction_key(&env, &user);
-            if let Some(pred) = env.storage().persistent().get::<_, UserPrediction>(&pred_key) {
+            if let Some(pred) = env
+                .storage()
+                .persistent()
+                .get::<_, UserPrediction>(&pred_key)
+            {
                 items.push_back(RevealedPredictionItem {
                     user: pred.user,
                     outcome: pred.outcome,
