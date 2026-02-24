@@ -84,6 +84,7 @@ const PENDING_COUNT_KEY: &str = "pending_count";
 const COMMIT_PREFIX: &str = "commit";
 const PARTICIPANTS_KEY: &str = "participants";
 const PREDICTION_PREFIX: &str = "prediction";
+const REVEALED_PARTICIPANTS_KEY: &str = "revealed_participants";
 const REFUNDED_PREFIX: &str = "refunded";
 const WINNING_OUTCOME_KEY: &str = "winning_outcome";
 const WINNER_SHARES_KEY: &str = "winner_shares";
