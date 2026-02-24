@@ -76,6 +76,7 @@ const PENDING_COUNT_KEY: &str = "pending_count";
 const COMMIT_PREFIX: &str = "commit";
 const PARTICIPANTS_KEY: &str = "participants";
 const PREDICTION_PREFIX: &str = "prediction";
+const REVEALED_PARTICIPANTS_KEY: &str = "revealed_participants";
 const WINNING_OUTCOME_KEY: &str = "winning_outcome";
 const WINNER_SHARES_KEY: &str = "winner_shares";
 const LOSER_SHARES_KEY: &str = "loser_shares";
@@ -155,6 +156,24 @@ pub const PREDICTION_STATUS_REVEALED: u32 = 1;
 
 /// Sentinel for predicted_outcome when not yet revealed
 pub const PREDICTION_OUTCOME_NONE: u32 = 2;
+
+/// Single revealed prediction for paginated list (commit-phase privacy preserved)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevealedPredictionItem {
+    pub user: Address,
+    pub outcome: u32,
+    pub amount: i128,
+    pub timestamp: u64,
+}
+
+/// Result of paginated predictions query
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaginatedPredictionsResult {
+    pub items: Vec<RevealedPredictionItem>,
+    pub total: u32,
+}
 
 /// Result of get_user_prediction query - frontend user position
 #[contracttype]
@@ -516,6 +535,17 @@ impl PredictionMarket {
             timestamp: current_time,
         };
         env.storage().persistent().set(&prediction_key, &prediction);
+
+        // 9b. Add user to revealed participants list (for paginated list; preserves commit-phase privacy)
+        let mut revealed: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, REVEALED_PARTICIPANTS_KEY))
+            .unwrap_or_else(|| Vec::new(&env));
+        revealed.push_back(user.clone());
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, REVEALED_PARTICIPANTS_KEY), &revealed);
 
         // 10. Update prediction pools
         if outcome == 1 {
@@ -1087,16 +1117,53 @@ impl PredictionMarket {
         None
     }
 
-    /// Get all predictions in market (for governance/audits)
+    /// Return paginated list of all revealed predictions for this market.
     ///
-    /// TODO: Get All Predictions
-    /// - Require admin or oracle role
-    /// - Return list of all user predictions
-    /// - Include: user address, outcome, amount for each
-    /// - Include participation count and total_volume
-    /// - Exclude: user private data (privacy-preserving)
-    pub fn get_all_predictions(_env: Env, _market_id: BytesN<32>) -> Vec<Symbol> {
-        todo!("See get all predictions TODO above")
+    /// Only includes predictions that have been revealed (commit-phase privacy preserved).
+    /// Unrevealed commitments are never exposed.
+    ///
+    /// # Parameters
+    /// * `offset` - Index to start from (0-based)
+    /// * `limit` - Maximum number of items to return
+    ///
+    /// # Returns
+    /// * `PaginatedPredictionsResult` - `items` (slice of revealed predictions), `total` (total count of revealed predictions)
+    pub fn get_paginated_predictions(
+        env: Env,
+        _market_id: BytesN<32>,
+        offset: u32,
+        limit: u32,
+    ) -> PaginatedPredictionsResult {
+        let revealed: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, REVEALED_PARTICIPANTS_KEY))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = revealed.len() as u32;
+        let mut items = Vec::new(&env);
+
+        if limit == 0 {
+            return PaginatedPredictionsResult { items, total };
+        }
+
+        let start = offset.min(total);
+        let end = (start + limit).min(total);
+
+        for i in start..end {
+            let user = revealed.get(i).unwrap();
+            let pred_key = Self::get_prediction_key(&env, &user);
+            if let Some(pred) = env.storage().persistent().get::<_, UserPrediction>(&pred_key) {
+                items.push_back(RevealedPredictionItem {
+                    user: pred.user,
+                    outcome: pred.outcome,
+                    amount: pred.amount,
+                    timestamp: pred.timestamp,
+                });
+            }
+        }
+
+        PaginatedPredictionsResult { items, total }
     }
 
     /// Get market leaderboard (top predictors by winnings)
@@ -1421,8 +1488,18 @@ impl PredictionMarket {
             claimed: false,
             timestamp: env.ledger().timestamp(),
         };
-        let key = (Symbol::new(&env, PREDICTION_PREFIX), user);
+        let key = (Symbol::new(&env, PREDICTION_PREFIX), user.clone());
         env.storage().persistent().set(&key, &prediction);
+        // Keep revealed list in sync for get_paginated_predictions tests
+        let mut revealed: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, REVEALED_PARTICIPANTS_KEY))
+            .unwrap_or_else(|| Vec::new(&env));
+        revealed.push_back(user);
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, REVEALED_PARTICIPANTS_KEY), &revealed);
     }
 
     /// Test helper: Setup market resolution state directly
