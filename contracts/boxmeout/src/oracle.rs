@@ -260,11 +260,7 @@ impl OracleManager {
 
         // 2. Validate oracle is currently registered and active
         let oracle_key = (Symbol::new(&env, "oracle"), oracle.clone());
-        let is_active: bool = env
-            .storage()
-            .persistent()
-            .get(&oracle_key)
-            .unwrap_or(false);
+        let is_active: bool = env.storage().persistent().get(&oracle_key).unwrap_or(false);
 
         if !is_active {
             panic!("Oracle not registered or already inactive");
@@ -293,10 +289,9 @@ impl OracleManager {
                 .get(&Symbol::new(&env, REQUIRED_CONSENSUS_KEY))
                 .unwrap_or(0);
             if current_threshold > new_count {
-                env.storage().persistent().set(
-                    &Symbol::new(&env, REQUIRED_CONSENSUS_KEY),
-                    &new_count,
-                );
+                env.storage()
+                    .persistent()
+                    .set(&Symbol::new(&env, REQUIRED_CONSENSUS_KEY), &new_count);
             }
         }
 
