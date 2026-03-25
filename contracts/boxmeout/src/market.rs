@@ -61,8 +61,10 @@ pub struct MarketDisputedEvent {
 }
 
 #[contractevent]
-pub struct MarketCancelledEvent {
+pub struct RefundedEvent {
+    pub user: Address,
     pub market_id: BytesN<32>,
+    pub amount: i128,
     pub timestamp: u64,
 }
 
@@ -82,6 +84,8 @@ const PENDING_COUNT_KEY: &str = "pending_count";
 const COMMIT_PREFIX: &str = "commit";
 const PARTICIPANTS_KEY: &str = "participants";
 const PREDICTION_PREFIX: &str = "prediction";
+const REVEALED_PARTICIPANTS_KEY: &str = "revealed_participants";
+const REFUNDED_PREFIX: &str = "refunded";
 const WINNING_OUTCOME_KEY: &str = "winning_outcome";
 const WINNER_SHARES_KEY: &str = "winner_shares";
 const LOSER_SHARES_KEY: &str = "loser_shares";
@@ -161,6 +165,24 @@ pub const PREDICTION_STATUS_REVEALED: u32 = 1;
 
 /// Sentinel for predicted_outcome when not yet revealed
 pub const PREDICTION_OUTCOME_NONE: u32 = 2;
+
+/// Single revealed prediction for paginated list (commit-phase privacy preserved)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevealedPredictionItem {
+    pub user: Address,
+    pub outcome: u32,
+    pub amount: i128,
+    pub timestamp: u64,
+}
+
+/// Result of paginated predictions query
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaginatedPredictionsResult {
+    pub items: Vec<RevealedPredictionItem>,
+    pub total: u32,
+}
 
 /// Result of get_user_prediction query - frontend user position
 #[contracttype]
@@ -409,6 +431,11 @@ impl PredictionMarket {
         (Symbol::new(env, PREDICTION_PREFIX), user.clone())
     }
 
+    /// Helper: Storage key for refunded flag (prevents double-refund)
+    fn get_refunded_key(env: &Env, user: &Address) -> (Symbol, Address) {
+        (Symbol::new(env, REFUNDED_PREFIX), user.clone())
+    }
+
     /// Helper: Get user commitment (for testing and reveal phase)
     pub fn get_commitment(env: Env, user: Address) -> Option<Commitment> {
         let commit_key = Self::get_commit_key(&env, &user);
@@ -522,6 +549,17 @@ impl PredictionMarket {
             timestamp: current_time,
         };
         env.storage().persistent().set(&prediction_key, &prediction);
+
+        // 9b. Add user to revealed participants list (for paginated list; preserves commit-phase privacy)
+        let mut revealed: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, REVEALED_PARTICIPANTS_KEY))
+            .unwrap_or_else(|| Vec::new(&env));
+        revealed.push_back(user.clone());
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, REVEALED_PARTICIPANTS_KEY), &revealed);
 
         // 10. Update prediction pools
         if outcome == 1 {
@@ -1093,16 +1131,57 @@ impl PredictionMarket {
         None
     }
 
-    /// Get all predictions in market (for governance/audits)
+    /// Return paginated list of all revealed predictions for this market.
     ///
-    /// TODO: Get All Predictions
-    /// - Require admin or oracle role
-    /// - Return list of all user predictions
-    /// - Include: user address, outcome, amount for each
-    /// - Include participation count and total_volume
-    /// - Exclude: user private data (privacy-preserving)
-    pub fn get_all_predictions(_env: Env, _market_id: BytesN<32>) -> Vec<Symbol> {
-        todo!("See get all predictions TODO above")
+    /// Only includes predictions that have been revealed (commit-phase privacy preserved).
+    /// Unrevealed commitments are never exposed.
+    ///
+    /// # Parameters
+    /// * `offset` - Index to start from (0-based)
+    /// * `limit` - Maximum number of items to return
+    ///
+    /// # Returns
+    /// * `PaginatedPredictionsResult` - `items` (slice of revealed predictions), `total` (total count of revealed predictions)
+    pub fn get_paginated_predictions(
+        env: Env,
+        _market_id: BytesN<32>,
+        offset: u32,
+        limit: u32,
+    ) -> PaginatedPredictionsResult {
+        let revealed: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, REVEALED_PARTICIPANTS_KEY))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = revealed.len();
+        let mut items = Vec::new(&env);
+
+        if limit == 0 {
+            return PaginatedPredictionsResult { items, total };
+        }
+
+        let start = offset.min(total);
+        let end = (start + limit).min(total);
+
+        for i in start..end {
+            let user = revealed.get(i).unwrap();
+            let pred_key = Self::get_prediction_key(&env, &user);
+            if let Some(pred) = env
+                .storage()
+                .persistent()
+                .get::<_, UserPrediction>(&pred_key)
+            {
+                items.push_back(RevealedPredictionItem {
+                    user: pred.user,
+                    outcome: pred.outcome,
+                    amount: pred.amount,
+                    timestamp: pred.timestamp,
+                });
+            }
+        }
+
+        PaginatedPredictionsResult { items, total }
     }
 
     /// Get market leaderboard (top predictors by winnings)
@@ -1316,10 +1395,10 @@ impl PredictionMarket {
     /// - Require admin authentication
     /// - Validate caller is the protocol admin via Factory
     /// - Validate market state is OPEN or CLOSED (not resolved)
-    /// - Set market state to CANCELLED
-    /// - Emit MarketCancelled(market_id, timestamp)
-    pub fn cancel_market(env: Env, admin: Address, market_id: BytesN<32>) {
-        admin.require_auth();
+    /// - Set market state to CANCELLED; participants claim refunds via claim_refund
+    /// - Emit MarketCancelled(market_id, creator, timestamp)
+    pub fn cancel_market(env: Env, creator: Address, market_id: BytesN<32>) {
+        creator.require_auth();
 
         let factory: Address = env
             .storage()
@@ -1350,6 +1429,7 @@ impl PredictionMarket {
             panic!("Market already cancelled");
         }
 
+        // Set state to CANCELLED; participants claim refunds via claim_refund (only callable when CANCELLED)
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_CANCELLED);
@@ -1363,24 +1443,28 @@ impl PredictionMarket {
         .publish(&env);
     }
 
-    /// Claim refund for a cancelled market
+    /// Refund committed USDC to a participant. Only callable when market is CANCELLED.
     ///
-    /// - Require user authentication
-    /// - Validate market state is CANCELLED
-    /// - Find user's commitment or prediction
-    /// - Transfer original amount back to user
-    /// - Remove record to prevent double refunds
-    pub fn refund_position(env: Env, user: Address) {
+    /// - Requires market state is CANCELLED
+    /// - Refunds exact committed/revealed amount (from commitment or prediction)
+    /// - Tracks refund status to prevent double-refunds
+    /// - Emits RefundedEvent
+    pub fn claim_refund(env: Env, user: Address, market_id: BytesN<32>) {
         user.require_auth();
 
         let state: u32 = env
             .storage()
             .persistent()
             .get(&Symbol::new(&env, MARKET_STATE_KEY))
-            .expect("Market state not found");
+            .expect("Market not initialized");
 
         if state != STATE_CANCELLED {
-            panic!("Market not cancelled");
+            panic!("Refunds only available for cancelled markets");
+        }
+
+        let refunded_key = Self::get_refunded_key(&env, &user);
+        if env.storage().persistent().has(&refunded_key) {
+            panic!("Already refunded");
         }
 
         let usdc: Address = env
@@ -1391,22 +1475,34 @@ impl PredictionMarket {
         let token_client = token::TokenClient::new(&env, &usdc);
         let contract = env.current_contract_address();
 
-        let commit_key = Self::get_commit_key(&env, &user);
-        let pred_key = Self::get_prediction_key(&env, &user);
-
-        if let Some(commitment) = env.storage().persistent().get::<_, Commitment>(&commit_key) {
-            if commitment.amount > 0 {
-                token_client.transfer(&contract, &user, &commitment.amount);
-            }
-            env.storage().persistent().remove(&commit_key);
-        } else if let Some(pred) = env.storage().persistent().get::<_, UserPrediction>(&pred_key) {
-            if pred.amount > 0 && !pred.claimed {
-                token_client.transfer(&contract, &user, &pred.amount);
-            }
+        let amount = if let Some(commitment) = Self::get_commitment(env.clone(), user.clone()) {
+            env.storage()
+                .persistent()
+                .remove(&Self::get_commit_key(&env, &user));
+            commitment.amount
+        } else if let Some(pred) = Self::test_get_prediction(env.clone(), user.clone()) {
+            let pred_key = Self::get_prediction_key(&env, &user);
             env.storage().persistent().remove(&pred_key);
+            pred.amount
         } else {
-            panic!("No position found");
+            panic!("No commitment or prediction found for user");
+        };
+
+        if amount <= 0 {
+            panic!("No amount to refund");
         }
+
+        token_client.transfer(&contract, &user, &amount);
+
+        env.storage().persistent().set(&refunded_key, &true);
+
+        RefundedEvent {
+            user: user.clone(),
+            market_id,
+            amount,
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(&env);
     }
 
     // --- TEST HELPERS (Not for production use, but exposed for integration tests) ---
@@ -1434,8 +1530,18 @@ impl PredictionMarket {
             claimed: false,
             timestamp: env.ledger().timestamp(),
         };
-        let key = (Symbol::new(&env, PREDICTION_PREFIX), user);
+        let key = (Symbol::new(&env, PREDICTION_PREFIX), user.clone());
         env.storage().persistent().set(&key, &prediction);
+        // Keep revealed list in sync for get_paginated_predictions tests
+        let mut revealed: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, REVEALED_PARTICIPANTS_KEY))
+            .unwrap_or_else(|| Vec::new(&env));
+        revealed.push_back(user);
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, REVEALED_PARTICIPANTS_KEY), &revealed);
     }
 
     /// Test helper: Setup market resolution state directly
@@ -2337,6 +2443,50 @@ mod tests {
         // Try to reveal on closed market - should fail
         let result =
             market_client.try_reveal_prediction(&user, &market_id, &outcome, &amount, &salt);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reveal_rejects_wrong_amount() {
+        let (env, market_id, market_client, _usdc_client, user) = setup_reveal_test();
+
+        let salt = BytesN::from_array(&env, &[14; 32]);
+        let outcome = 1u32;
+        let amount = 100i128;
+
+        let commit_hash = compute_commit_hash(&env, &market_id, outcome, &salt);
+        market_client.commit_prediction(&user, &commit_hash, &amount);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+        });
+
+        // Reveal with WRONG amount
+        let wrong_amount = 200i128;
+        let result =
+            market_client.try_reveal_prediction(&user, &market_id, &outcome, &wrong_amount, &salt);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reveal_rejects_wrong_outcome_explicit() {
+        let (env, market_id, market_client, _usdc_client, user) = setup_reveal_test();
+
+        let salt = BytesN::from_array(&env, &[15; 32]);
+        let outcome = 1u32;
+        let amount = 100i128;
+
+        let commit_hash = compute_commit_hash(&env, &market_id, outcome, &salt);
+        market_client.commit_prediction(&user, &commit_hash, &amount);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+        });
+
+        // Reveal with WRONG outcome
+        let wrong_outcome = 0u32;
+        let result =
+            market_client.try_reveal_prediction(&user, &market_id, &wrong_outcome, &amount, &salt);
         assert!(result.is_err());
     }
 
