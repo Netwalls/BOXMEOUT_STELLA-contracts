@@ -60,6 +60,12 @@ pub struct MarketDisputedEvent {
     pub timestamp: u64,
 }
 
+#[contractevent]
+pub struct MarketCancelledEvent {
+    pub market_id: BytesN<32>,
+    pub timestamp: u64,
+}
+
 // Storage keys
 const MARKET_ID_KEY: &str = "market_id";
 const CREATOR_KEY: &str = "creator";
@@ -1305,24 +1311,30 @@ impl PredictionMarket {
         (yes_reserve, no_reserve, total_liquidity, yes_odds, no_odds)
     }
 
-    /// Emergency function: Market creator can cancel unresolved market
+    /// Emergency function: Protocol Admin can cancel unresolved market
     ///
-    /// - Require creator authentication
+    /// - Require admin authentication
+    /// - Validate caller is the protocol admin via Factory
     /// - Validate market state is OPEN or CLOSED (not resolved)
-    /// - Refund all participants (commitments and predictions)
     /// - Set market state to CANCELLED
-    /// - Emit MarketCancelled(market_id, creator, timestamp)
-    pub fn cancel_market(env: Env, creator: Address, market_id: BytesN<32>) {
-        creator.require_auth();
+    /// - Emit MarketCancelled(market_id, timestamp)
+    pub fn cancel_market(env: Env, admin: Address, market_id: BytesN<32>) {
+        admin.require_auth();
 
-        let stored_creator: Address = env
+        let factory: Address = env
             .storage()
             .persistent()
-            .get(&Symbol::new(&env, CREATOR_KEY))
+            .get(&Symbol::new(&env, FACTORY_KEY))
             .expect("Market not initialized");
 
-        if creator != stored_creator {
-            panic!("Unauthorized: only creator can cancel");
+        // Verify the admin is indeed the protocol admin from the factory
+        let real_admin: Address = env.invoke_contract(
+            &factory,
+            &Symbol::new(&env, "get_admin"),
+            soroban_sdk::vec![&env],
+        );
+        if admin != real_admin {
+            panic!("Unauthorized: only admin can cancel");
         }
 
         let state: u32 = env
@@ -1338,6 +1350,39 @@ impl PredictionMarket {
             panic!("Market already cancelled");
         }
 
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_CANCELLED);
+
+        let timestamp = env.ledger().timestamp();
+
+        MarketCancelledEvent {
+            market_id,
+            timestamp,
+        }
+        .publish(&env);
+    }
+
+    /// Claim refund for a cancelled market
+    ///
+    /// - Require user authentication
+    /// - Validate market state is CANCELLED
+    /// - Find user's commitment or prediction
+    /// - Transfer original amount back to user
+    /// - Remove record to prevent double refunds
+    pub fn refund_position(env: Env, user: Address) {
+        user.require_auth();
+
+        let state: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, MARKET_STATE_KEY))
+            .expect("Market state not found");
+
+        if state != STATE_CANCELLED {
+            panic!("Market not cancelled");
+        }
+
         let usdc: Address = env
             .storage()
             .persistent()
@@ -1346,54 +1391,22 @@ impl PredictionMarket {
         let token_client = token::TokenClient::new(&env, &usdc);
         let contract = env.current_contract_address();
 
-        let participants: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&Symbol::new(&env, PARTICIPANTS_KEY))
-            .unwrap_or_else(|| Vec::new(&env));
+        let commit_key = Self::get_commit_key(&env, &user);
+        let pred_key = Self::get_prediction_key(&env, &user);
 
-        let len = participants.len();
-        for i in 0..len {
-            let user = participants.get(i).expect("participant");
-            if let Some(commitment) = Self::get_commitment(env.clone(), user.clone()) {
-                if commitment.amount > 0 {
-                    token_client.transfer(&contract, &user, &commitment.amount);
-                }
-                env.storage()
-                    .persistent()
-                    .remove(&Self::get_commit_key(&env, &user));
-            } else if let Some(pred) = Self::test_get_prediction(env.clone(), user.clone()) {
-                if pred.amount > 0 {
-                    token_client.transfer(&contract, &user, &pred.amount);
-                }
-                let pred_key = (Symbol::new(&env, PREDICTION_PREFIX), user.clone());
-                env.storage().persistent().remove(&pred_key);
+        if let Some(commitment) = env.storage().persistent().get::<_, Commitment>(&commit_key) {
+            if commitment.amount > 0 {
+                token_client.transfer(&contract, &user, &commitment.amount);
             }
+            env.storage().persistent().remove(&commit_key);
+        } else if let Some(pred) = env.storage().persistent().get::<_, UserPrediction>(&pred_key) {
+            if pred.amount > 0 && !pred.claimed {
+                token_client.transfer(&contract, &user, &pred.amount);
+            }
+            env.storage().persistent().remove(&pred_key);
+        } else {
+            panic!("No position found");
         }
-
-        env.storage().persistent().set(
-            &Symbol::new(&env, PARTICIPANTS_KEY),
-            &Vec::<Address>::new(&env),
-        );
-        env.storage()
-            .persistent()
-            .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_CANCELLED);
-
-        let timestamp = env.ledger().timestamp();
-
-        #[contractevent]
-        pub struct MarketCancelledEvent {
-            pub market_id: BytesN<32>,
-            pub creator: Address,
-            pub timestamp: u64,
-        }
-
-        MarketCancelledEvent {
-            market_id,
-            creator,
-            timestamp,
-        }
-        .publish(&env);
     }
 
     // --- TEST HELPERS (Not for production use, but exposed for integration tests) ---

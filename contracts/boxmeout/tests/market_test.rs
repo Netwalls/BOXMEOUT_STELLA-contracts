@@ -913,3 +913,159 @@ fn test_get_market_state_serializable() {
     // If we got here, the struct is properly serializable
     // Verification complete
 }
+
+// ============================================================================
+// CANCEL MARKET & REFUND TESTS
+// ============================================================================
+
+#[test]
+fn test_cancel_market_happy_path() {
+    let env = create_test_env();
+    
+    let factory_contract = env.register(boxmeout::factory::MarketFactory, ());
+    let factory_client = boxmeout::factory::MarketFactoryClient::new(&env, &factory_contract);
+    
+    let admin = Address::generate(&env);
+    let usdc_address = Address::generate(&env);
+    let treasury_address = Address::generate(&env);
+    
+    env.mock_all_auths();
+    factory_client.initialize(&admin, &usdc_address, &treasury_address);
+    
+    let market_contract = register_market(&env);
+    let client = PredictionMarketClient::new(&env, &market_contract);
+
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let creator = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let closing_time = env.ledger().timestamp() + 86400;
+    let resolution_time = closing_time + 3600;
+
+    client.initialize(
+        &market_id,
+        &creator,
+        &factory_contract,
+        &usdc_address,
+        &oracle,
+        &closing_time,
+        &resolution_time,
+    );
+    
+    assert_eq!(client.get_market_state_value().unwrap(), 0);
+    client.cancel_market(&admin, &market_id);
+    assert_eq!(client.get_market_state_value().unwrap(), 4);
+}
+
+#[test]
+#[should_panic(expected = "Unauthorized: only admin can cancel")]
+fn test_cancel_market_unauthorized() {
+    let env = create_test_env();
+    let factory_contract = env.register(boxmeout::factory::MarketFactory, ());
+    let factory_client = boxmeout::factory::MarketFactoryClient::new(&env, &factory_contract);
+    
+    let admin = Address::generate(&env);
+    let fake_admin = Address::generate(&env);
+    let usdc_address = Address::generate(&env);
+    let treasury_address = Address::generate(&env);
+    
+    env.mock_all_auths();
+    factory_client.initialize(&admin, &usdc_address, &treasury_address);
+    
+    let market_contract = register_market(&env);
+    let client = PredictionMarketClient::new(&env, &market_contract);
+
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let creator = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let closing_time = env.ledger().timestamp() + 86400;
+    let resolution_time = closing_time + 3600;
+
+    client.initialize(
+        &market_id,
+        &creator,
+        &factory_contract,
+        &usdc_address,
+        &oracle,
+        &closing_time,
+        &resolution_time,
+    );
+    
+    client.cancel_market(&fake_admin, &market_id);
+}
+
+#[test]
+fn test_refund_position_happy_path() {
+    let env = create_test_env();
+    let admin = Address::generate(&env);
+    let (token_client, usdc_address) = create_usdc_token(&env, &admin);
+
+    let factory_contract = env.register(boxmeout::factory::MarketFactory, ());
+    let factory_client = boxmeout::factory::MarketFactoryClient::new(&env, &factory_contract);
+    let treasury_address = Address::generate(&env);
+    
+    env.mock_all_auths();
+    factory_client.initialize(&admin, &usdc_address, &treasury_address);
+
+    let market_contract = register_market(&env);
+    let client = PredictionMarketClient::new(&env, &market_contract);
+    
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let creator = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let closing_time = env.ledger().timestamp() + 86400;
+    let resolution_time = closing_time + 3600;
+
+    client.initialize(&market_id, &creator, &factory_contract, &usdc_address, &oracle, &closing_time, &resolution_time);
+
+    let user = Address::generate(&env);
+    let amount = 1000i128;
+    token_client.mint(&user, &amount);
+    token_client.approve(&user, &market_contract, &amount, &(env.ledger().sequence() + 100));
+
+    let hash = BytesN::from_array(&env, &[2u8; 32]);
+    client.commit_prediction(&user, &hash, &amount);
+
+    client.cancel_market(&admin, &market_id);
+    client.refund_position(&user);
+
+    assert_eq!(token_client.balance(&user), amount);
+    assert_eq!(token_client.balance(&market_contract), 0);
+}
+
+#[test]
+#[should_panic(expected = "No position found")]
+fn test_refund_position_already_refunded() {
+    let env = create_test_env();
+    let admin = Address::generate(&env);
+    let (token_client, usdc_address) = create_usdc_token(&env, &admin);
+
+    let factory_contract = env.register(boxmeout::factory::MarketFactory, ());
+    let factory_client = boxmeout::factory::MarketFactoryClient::new(&env, &factory_contract);
+    let treasury_address = Address::generate(&env);
+    
+    env.mock_all_auths();
+    factory_client.initialize(&admin, &usdc_address, &treasury_address);
+
+    let market_contract = register_market(&env);
+    let client = PredictionMarketClient::new(&env, &market_contract);
+    
+    let market_id = BytesN::from_array(&env, &[1u8; 32]);
+    let creator = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let closing_time = env.ledger().timestamp() + 86400;
+    let resolution_time = closing_time + 3600;
+
+    client.initialize(&market_id, &creator, &factory_contract, &usdc_address, &oracle, &closing_time, &resolution_time);
+
+    let user = Address::generate(&env);
+    let amount = 1000i128;
+    token_client.mint(&user, &amount);
+    token_client.approve(&user, &market_contract, &amount, &(env.ledger().sequence() + 100));
+
+    let hash = BytesN::from_array(&env, &[2u8; 32]);
+    client.commit_prediction(&user, &hash, &amount);
+
+    client.cancel_market(&admin, &market_id);
+    client.refund_position(&user);
+    client.refund_position(&user);
+}
