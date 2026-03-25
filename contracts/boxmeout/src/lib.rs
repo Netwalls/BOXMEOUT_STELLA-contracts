@@ -13,6 +13,7 @@ pub mod oracle;
 pub mod treasury;
 
 pub mod helpers;
+pub mod math;
 
 // Feature-gated exports for WASM builds
 #[cfg(feature = "market")]
