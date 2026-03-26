@@ -11,6 +11,8 @@ pub mod market;
 pub mod oracle;
 #[cfg(any(feature = "treasury", test, feature = "testutils"))]
 pub mod treasury;
+#[cfg(any(feature = "prediction_market", test, feature = "testutils"))]
+pub mod prediction_market;
 
 pub mod helpers;
 
