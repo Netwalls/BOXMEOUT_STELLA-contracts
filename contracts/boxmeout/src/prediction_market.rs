@@ -44,6 +44,8 @@ pub struct Config {
     pub max_outcomes: u32,
     /// Bond required to open a dispute (in token units)
     pub dispute_bond: i128,
+    /// Whether the contract is currently emergency-paused
+    pub emergency_paused: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +72,12 @@ pub enum PredictionMarketError {
     Unauthorized = 7,
     /// Contract has not been initialized yet
     NotInitialized = 8,
+    /// Contract is emergency-paused; all mutating operations are blocked
+    EmergencyPaused = 9,
+    /// Pause requested but contract is already paused
+    AlreadyPaused = 10,
+    /// Unpause requested but contract is not paused
+    AlreadyUnpaused = 11,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +102,18 @@ pub mod events {
         pub admin: Address,
         pub old_bond: i128,
         pub new_bond: i128,
+    }
+
+    #[contractevent]
+    pub struct EmergencyPaused {
+        pub admin: Address,
+        pub timestamp: u64,
+    }
+
+    #[contractevent]
+    pub struct EmergencyUnpaused {
+        pub admin: Address,
+        pub timestamp: u64,
     }
 }
 
@@ -164,6 +184,7 @@ impl PredictionMarketContract {
             min_trade,
             max_outcomes,
             dispute_bond,
+            emergency_paused: false,
         };
 
         // ── Atomic writes (all succeed or none) ──────────────────────────────
@@ -221,6 +242,9 @@ impl PredictionMarketContract {
         admin: Address,
         new_bond: i128,
     ) -> Result<(), PredictionMarketError> {
+        // ── Circuit-breaker check ────────────────────────────────────────────
+        Self::require_not_paused(&env)?;
+
         // ── Load config (errors if not yet initialized) ──────────────────────
         let mut config: Config = env
             .storage()
@@ -254,6 +278,110 @@ impl PredictionMarketContract {
         }
         .publish(&env);
 
+        Ok(())
+    }
+
+    // ── Pause guard (shared by all mutating functions) ───────────────────────
+
+    fn require_not_paused(env: &Env) -> Result<(), PredictionMarketError> {
+        let paused: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EmergencyPause)
+            .unwrap_or(false);
+        if paused {
+            return Err(PredictionMarketError::EmergencyPaused);
+        }
+        Ok(())
+    }
+
+    // ── Admin helper (shared auth check) ────────────────────────────────────
+
+    fn require_admin(
+        env: &Env,
+        caller: &Address,
+    ) -> Result<Config, PredictionMarketError> {
+        let config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::NotInitialized)?;
+        if *caller != config.admin {
+            return Err(PredictionMarketError::Unauthorized);
+        }
+        caller.require_auth();
+        Ok(config)
+    }
+
+    /// Admin-only: pause all state-mutating operations.
+    /// Rejected if already paused.
+    pub fn emergency_pause(
+        env: Env,
+        admin: Address,
+    ) -> Result<(), PredictionMarketError> {
+        let mut config = Self::require_admin(&env, &admin)?;
+
+        if config.emergency_paused {
+            return Err(PredictionMarketError::AlreadyPaused);
+        }
+
+        // Atomic: update both storage locations together
+        config.emergency_paused = true;
+        env.storage().persistent().set(&DataKey::Config, &config);
+        env.storage()
+            .persistent()
+            .set(&DataKey::EmergencyPause, &true);
+
+        events::EmergencyPaused {
+            admin,
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Admin-only: lift the emergency pause.
+    /// Rejected if not currently paused.
+    pub fn emergency_unpause(
+        env: Env,
+        admin: Address,
+    ) -> Result<(), PredictionMarketError> {
+        let mut config = Self::require_admin(&env, &admin)?;
+
+        if !config.emergency_paused {
+            return Err(PredictionMarketError::AlreadyUnpaused);
+        }
+
+        // Atomic: update both storage locations together
+        config.emergency_paused = false;
+        env.storage().persistent().set(&DataKey::Config, &config);
+        env.storage()
+            .persistent()
+            .set(&DataKey::EmergencyPause, &false);
+
+        events::EmergencyUnpaused {
+            admin,
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Example state-mutating function guarded by the circuit breaker.
+    /// Any real mutating function follows the same pattern: check pause first.
+    pub fn buy_shares(
+        env: Env,
+        _buyer: Address,
+        _market_id: u64,
+        _outcome: u32,
+        _amount: i128,
+    ) -> Result<(), PredictionMarketError> {
+        // ── Circuit-breaker check (must be first) ────────────────────────────
+        Self::require_not_paused(&env)?;
+
+        // ... actual buy logic would follow here ...
         Ok(())
     }
 }
@@ -729,5 +857,263 @@ mod tests {
         let client = PredictionMarketContractClient::new(&env, &cid);
         let result = client.try_update_dispute_bond(&admin, &500i128);
         assert_eq!(result, Err(Ok(PredictionMarketError::NotInitialized)));
+    }
+
+
+    // =========================================================================
+    // emergency_pause / emergency_unpause tests (Issue #256)
+    // =========================================================================
+
+    // -- helpers --------------------------------------------------------------
+
+    fn do_pause(
+        env: &Env,
+        cid: &Address,
+        admin: &Address,
+    ) -> Result<(), PredictionMarketError> {
+        PredictionMarketContractClient::new(env, cid).try_emergency_pause(admin)
+    }
+
+    fn do_unpause(
+        env: &Env,
+        cid: &Address,
+        admin: &Address,
+    ) -> Result<(), PredictionMarketError> {
+        PredictionMarketContractClient::new(env, cid).try_emergency_unpause(admin)
+    }
+
+    // -- emergency_pause happy path -------------------------------------------
+
+    #[test]
+    fn test_emergency_pause_success() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        assert!(do_pause(&env, &cid, &admin).is_ok());
+    }
+
+    #[test]
+    fn test_emergency_pause_sets_flag_true() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(client.is_paused());
+        assert!(client.get_config().unwrap().emergency_paused);
+    }
+
+    #[test]
+    fn test_emergency_pause_both_storage_locations_consistent() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        // DataKey::EmergencyPause and Config.emergency_paused must agree
+        assert_eq!(client.is_paused(), client.get_config().unwrap().emergency_paused);
+    }
+
+    #[test]
+    fn test_emergency_pause_emits_event() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let before = env.events().all().len();
+        do_pause(&env, &cid, &admin).unwrap();
+        assert!(env.events().all().len() > before);
+    }
+
+    // -- emergency_unpause happy path -----------------------------------------
+
+    #[test]
+    fn test_emergency_unpause_success() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        assert!(do_unpause(&env, &cid, &admin).is_ok());
+    }
+
+    #[test]
+    fn test_emergency_unpause_clears_flag() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        do_unpause(&env, &cid, &admin).unwrap();
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(!client.is_paused());
+        assert!(!client.get_config().unwrap().emergency_paused);
+    }
+
+    #[test]
+    fn test_emergency_unpause_both_storage_locations_consistent() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        do_unpause(&env, &cid, &admin).unwrap();
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert_eq!(client.is_paused(), client.get_config().unwrap().emergency_paused);
+    }
+
+    #[test]
+    fn test_emergency_unpause_emits_event() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        let before = env.events().all().len();
+        do_unpause(&env, &cid, &admin).unwrap();
+        assert!(env.events().all().len() > before);
+    }
+
+    // -- redundant call prevention --------------------------------------------
+
+    #[test]
+    fn test_pause_when_already_paused_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        let result = do_pause(&env, &cid, &admin);
+        assert_eq!(result, Err(Ok(PredictionMarketError::AlreadyPaused)));
+    }
+
+    #[test]
+    fn test_unpause_when_not_paused_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let result = do_unpause(&env, &cid, &admin);
+        assert_eq!(result, Err(Ok(PredictionMarketError::AlreadyUnpaused)));
+    }
+
+    // -- authorization --------------------------------------------------------
+
+    #[test]
+    fn test_pause_non_admin_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let attacker = Address::generate(&env);
+        let result = do_pause(&env, &cid, &attacker);
+        assert_eq!(result, Err(Ok(PredictionMarketError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_unpause_non_admin_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        let attacker = Address::generate(&env);
+        let result = do_unpause(&env, &cid, &attacker);
+        assert_eq!(result, Err(Ok(PredictionMarketError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_pause_unauthorized_does_not_mutate_state() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let attacker = Address::generate(&env);
+        let _ = do_pause(&env, &cid, &attacker);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(!client.is_paused());
+    }
+
+    // -- mutating functions blocked while paused ------------------------------
+
+    #[test]
+    fn test_buy_shares_blocked_when_paused() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+
+        let buyer = Address::generate(&env);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_buy_shares(&buyer, &1u64, &1u32, &100i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::EmergencyPaused)));
+    }
+
+    #[test]
+    fn test_update_dispute_bond_blocked_when_paused() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_update_dispute_bond(&admin, &999i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::EmergencyPaused)));
+    }
+
+    #[test]
+    fn test_no_state_change_while_paused() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let bond_before = client.get_config().unwrap().dispute_bond;
+        let _ = client.try_update_dispute_bond(&admin, &999i128);
+        assert_eq!(client.get_config().unwrap().dispute_bond, bond_before);
+    }
+
+    // -- unpausing restores normal functionality ------------------------------
+
+    #[test]
+    fn test_buy_shares_allowed_after_unpause() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        do_unpause(&env, &cid, &admin).unwrap();
+
+        let buyer = Address::generate(&env);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        // Should no longer return EmergencyPaused
+        let result = client.try_buy_shares(&buyer, &1u64, &1u32, &100i128);
+        assert_ne!(result, Err(Ok(PredictionMarketError::EmergencyPaused)));
+    }
+
+    #[test]
+    fn test_update_dispute_bond_allowed_after_unpause() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        do_unpause(&env, &cid, &admin).unwrap();
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(client.try_update_dispute_bond(&admin, &999i128).is_ok());
+    }
+
+    // -- not initialized ------------------------------------------------------
+
+    #[test]
+    fn test_pause_before_init_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let cid = env.register(PredictionMarketContract, ());
+        let result = do_pause(&env, &cid, &admin);
+        assert_eq!(result, Err(Ok(PredictionMarketError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_unpause_before_init_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let cid = env.register(PredictionMarketContract, ());
+        let result = do_unpause(&env, &cid, &admin);
+        assert_eq!(result, Err(Ok(PredictionMarketError::NotInitialized)));
+    }
+
+    // -- pause/unpause cycle --------------------------------------------------
+
+    #[test]
+    fn test_multiple_pause_unpause_cycles() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+
+        for _ in 0..3 {
+            do_pause(&env, &cid, &admin).unwrap();
+            do_unpause(&env, &cid, &admin).unwrap();
+        }
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(!client.is_paused());
     }
 }
