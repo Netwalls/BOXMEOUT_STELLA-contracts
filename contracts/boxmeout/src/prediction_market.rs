@@ -15,6 +15,7 @@ pub enum DataKey {
     Config,
     NextMarketId,
     EmergencyPause,
+
     Market(u64),   // keyed by market_id
     Operator,      // designated operator address (optional)
 }
@@ -45,6 +46,7 @@ pub struct Market {
     pub status: MarketStatus,
     pub created_at: u64,
     pub closed_at: Option<u64>,
+
 }
 
 // ---------------------------------------------------------------------------
@@ -74,8 +76,10 @@ pub struct Config {
     pub max_outcomes: u32,
     /// Bond required to open a dispute (in token units)
     pub dispute_bond: i128,
+
     /// Whether the contract is currently emergency-paused
     pub emergency_paused: bool,
+
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +102,7 @@ pub enum PredictionMarketError {
     InvalidMaxOutcomes = 5,
     /// dispute_bond must be > 0
     InvalidDisputeBond = 6,
+
     /// Caller is not the admin
     Unauthorized = 7,
     /// Contract has not been initialized yet
@@ -112,6 +117,7 @@ pub enum PredictionMarketError {
     MarketNotFound = 12,
     /// Market is already closed or in a terminal state
     InvalidMarketStatus = 13,
+
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +136,7 @@ pub mod events {
         pub protocol_fee_bps: u32,
         pub creator_fee_bps: u32,
     }
+
 
     #[contractevent]
     pub struct DisputeBondUpdated {
@@ -156,6 +163,7 @@ pub mod events {
         pub closed_by: Address,
         pub timestamp: u64,
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +233,9 @@ impl PredictionMarketContract {
             min_trade,
             max_outcomes,
             dispute_bond,
+
             emergency_paused: false,
+
         };
 
         // ── Atomic writes (all succeed or none) ──────────────────────────────
@@ -270,6 +280,7 @@ impl PredictionMarketContract {
             .get(&DataKey::EmergencyPause)
             .unwrap_or(false)
     }
+
 
     /// Admin-only: update the minimum dispute bond.
     ///
@@ -562,6 +573,7 @@ impl PredictionMarketContract {
 
         Ok(())
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -906,6 +918,7 @@ mod tests {
         let client = PredictionMarketContractClient::new(&env, &cid);
         assert!(client.get_config().is_none());
     }
+
 
 
     // =========================================================================
@@ -1523,4 +1536,5 @@ mod tests {
         // Exactly one new event (MarketClosed)
         assert_eq!(env.events().all().len(), before + 1);
     }
+
 }
