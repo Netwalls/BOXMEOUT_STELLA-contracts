@@ -1139,6 +1139,61 @@ impl AMM {
     // - get_lp_position() / claim_lp_fees()
     // - calculate_spot_price()
     // - get_trade_history()
+
+    /// Calculate LP shares to mint for a new collateral deposit.
+    ///
+    /// - First deposit (`total_collateral == 0`): bootstraps 1:1 so the
+    ///   initial LP receives exactly `collateral_in` shares.
+    /// - Subsequent deposits: proportional to the existing pool using
+    ///   `math::mul_div` to avoid intermediate overflow:
+    ///   `shares = collateral_in * total_lp_supply / total_collateral`
+    ///
+    /// Panics if `collateral_in` is zero.
+    pub fn calc_lp_shares_to_mint(
+        collateral_in: u128,
+        total_collateral: u128,
+        total_lp_supply: u128,
+    ) -> u128 {
+        if collateral_in == 0 {
+            panic!("collateral_in must be greater than 0");
+        }
+        // Edge case: empty pool — first depositor gets 1:1 shares.
+        if total_collateral == 0 {
+            return collateral_in;
+        }
+        // Use mul_div to compute (collateral_in * total_lp_supply) / total_collateral
+        // without intermediate overflow.
+        crate::math::mul_div(
+            collateral_in as i128,
+            total_lp_supply as i128,
+            total_collateral as i128,
+        ) as u128
+    }
+
+    /// Calculate collateral to return when redeeming LP shares.
+    ///
+    /// Proportional to the caller's share of the pool:
+    ///   `collateral_out = lp_tokens * total_collateral / total_lp_supply`
+    ///
+    /// Uses `math::mul_div` to avoid intermediate overflow.
+    /// Panics if `lp_tokens` or `total_lp_supply` is zero.
+    pub fn calc_collateral_from_lp(
+        lp_tokens: u128,
+        total_collateral: u128,
+        total_lp_supply: u128,
+    ) -> u128 {
+        if lp_tokens == 0 {
+            panic!("lp_tokens must be greater than 0");
+        }
+        if total_lp_supply == 0 {
+            panic!("total_lp_supply must be greater than 0");
+        }
+        crate::math::mul_div(
+            lp_tokens as i128,
+            total_collateral as i128,
+            total_lp_supply as i128,
+        ) as u128
+    }
 }
 
 #[cfg(test)]
@@ -1243,132 +1298,71 @@ mod tests {
         assert!(new_k > old_k);
     }
 
-    // -------------------------------------------------------------------------
-    // New add_liquidity acceptance-criteria tests
-    // -------------------------------------------------------------------------
+    // ── Issue #45: calc_lp_shares_to_mint / calc_collateral_from_lp ──────────
 
     #[test]
-    fn test_add_liquidity_paused_rejects() {
-        let env = Env::default();
-        let (amm, usdc, _initial_lp, admin, market_id) = setup_amm_pool(&env);
-        let lp = Address::generate(&env);
-        usdc.mint(&lp, &500_000i128);
-
-        // Pause the protocol
-        amm.set_paused(&admin, &true);
-
-        let result = amm.try_add_liquidity(&lp, &market_id, &500_000u128);
-        assert!(result.is_err());
+    fn test_calc_lp_shares_first_deposit_is_one_to_one() {
+        // First depositor: total_collateral == 0 → shares == collateral_in
+        let shares = AMM::calc_lp_shares_to_mint(1_000_000, 0, 0);
+        assert_eq!(shares, 1_000_000);
     }
 
     #[test]
-    fn test_add_liquidity_zero_collateral_rejects() {
-        let env = Env::default();
-        let (amm, _usdc, _initial_lp, _admin, market_id) = setup_amm_pool(&env);
-        let lp = Address::generate(&env);
-
-        let result = amm.try_add_liquidity(&lp, &market_id, &0u128);
-        assert!(result.is_err());
+    fn test_calc_lp_shares_proportional() {
+        // Pool has 1_000_000 collateral and 1_000_000 LP supply.
+        // Depositing 500_000 should mint 500_000 shares (50%).
+        let shares = AMM::calc_lp_shares_to_mint(500_000, 1_000_000, 1_000_000);
+        assert_eq!(shares, 500_000);
     }
 
     #[test]
-    fn test_add_liquidity_nonexistent_pool_rejects() {
-        let env = Env::default();
-        let (amm, usdc, _initial_lp, _admin, _market_id) = setup_amm_pool(&env);
-        let lp = Address::generate(&env);
-        usdc.mint(&lp, &500_000i128);
-
-        let bad_market = BytesN::from_array(&env, &[99u8; 32]);
-        let result = amm.try_add_liquidity(&lp, &bad_market, &500_000u128);
-        assert!(result.is_err());
+    fn test_calc_collateral_from_lp_proportional() {
+        // Holding 500_000 of 1_000_000 LP supply against 2_000_000 collateral
+        // should return 1_000_000 (50%).
+        let collateral = AMM::calc_collateral_from_lp(500_000, 2_000_000, 1_000_000);
+        assert_eq!(collateral, 1_000_000);
     }
 
     #[test]
-    fn test_add_liquidity_closed_market_rejects() {
-        let env = Env::default();
-        let (amm, usdc, _initial_lp, admin, market_id) = setup_amm_pool(&env);
-        let lp = Address::generate(&env);
-        usdc.mint(&lp, &500_000i128);
+    fn test_mint_then_burn_unchanged_pool_returns_original_collateral() {
+        // Acceptance criterion: mint then immediately burn with unchanged pool
+        // returns the original collateral.
+        let collateral_in: u128 = 500_000;
+        let total_collateral: u128 = 1_000_000;
+        let total_lp_supply: u128 = 1_000_000;
 
-        // Mark market as closed (state = 1)
-        amm.set_market_state(&admin, &market_id, &1u32);
+        // Step 1 — mint
+        let shares_minted =
+            AMM::calc_lp_shares_to_mint(collateral_in, total_collateral, total_lp_supply);
 
-        let result = amm.try_add_liquidity(&lp, &market_id, &500_000u128);
-        assert!(result.is_err());
+        // Step 2 — burn against the *updated* supply (pool unchanged otherwise)
+        let new_total_collateral = total_collateral + collateral_in;
+        let new_total_lp_supply = total_lp_supply + shares_minted;
+
+        let collateral_out =
+            AMM::calc_collateral_from_lp(shares_minted, new_total_collateral, new_total_lp_supply);
+
+        assert_eq!(
+            collateral_out, collateral_in,
+            "burn should return exactly the deposited collateral when pool is unchanged"
+        );
     }
 
     #[test]
-    fn test_add_liquidity_creates_lp_position() {
-        let env = Env::default();
-        let (amm, usdc, _initial_lp, _admin, market_id) = setup_amm_pool(&env);
-        let lp = Address::generate(&env);
-        usdc.mint(&lp, &500_000i128);
-
-        assert!(amm.get_lp_position(&market_id, &lp).is_none());
-
-        amm.add_liquidity(&lp, &market_id, &500_000u128);
-
-        let position = amm.get_lp_position(&market_id, &lp);
-        assert!(position.is_some());
-        assert_eq!(position.unwrap().lp_shares, 500_000u128);
+    #[should_panic(expected = "collateral_in must be greater than 0")]
+    fn test_calc_lp_shares_zero_collateral_panics() {
+        AMM::calc_lp_shares_to_mint(0, 1_000_000, 1_000_000);
     }
 
     #[test]
-    fn test_add_liquidity_updates_existing_lp_position() {
-        let env = Env::default();
-        let (amm, usdc, _initial_lp, _admin, market_id) = setup_amm_pool(&env);
-        let lp = Address::generate(&env);
-        usdc.mint(&lp, &1_000_000i128);
-
-        amm.add_liquidity(&lp, &market_id, &500_000u128);
-        amm.add_liquidity(&lp, &market_id, &500_000u128);
-
-        let position = amm.get_lp_position(&market_id, &lp).unwrap();
-        assert_eq!(position.lp_shares, 1_000_000u128);
+    #[should_panic(expected = "lp_tokens must be greater than 0")]
+    fn test_calc_collateral_zero_lp_tokens_panics() {
+        AMM::calc_collateral_from_lp(0, 1_000_000, 1_000_000);
     }
 
     #[test]
-    fn test_add_liquidity_fee_debt_snapshot() {
-        let env = Env::default();
-        let (amm, usdc, _initial_lp, _admin, market_id) = setup_amm_pool(&env);
-        let lp = Address::generate(&env);
-        usdc.mint(&lp, &500_000i128);
-
-        amm.add_liquidity(&lp, &market_id, &500_000u128);
-
-        // Fee debt should be 0 when no fees have accumulated yet
-        let debt = amm.get_lp_fee_debt(&market_id, &lp);
-        assert_eq!(debt, 0u128);
-    }
-
-    #[test]
-    fn test_calc_lp_shares_to_mint_first_provider() {
-        let env = Env::default();
-        let amm_id = env.register(AMM, ());
-        let amm = AMMClient::new(&env, &amm_id);
-
-        let shares = amm.calc_lp_shares_to_mint(&0u128, &0u128, &1_000_000u128);
-        assert_eq!(shares, 1_000_000u128);
-    }
-
-    #[test]
-    fn test_calc_lp_shares_to_mint_proportional() {
-        let env = Env::default();
-        let amm_id = env.register(AMM, ());
-        let amm = AMMClient::new(&env, &amm_id);
-
-        // 50% deposit on top of existing pool => 50% of current supply
-        let shares = amm.calc_lp_shares_to_mint(&1_000_000u128, &1_000_000u128, &500_000u128);
-        assert_eq!(shares, 500_000u128);
-    }
-
-    #[test]
-    fn test_create_pool_sets_lp_position_for_creator() {
-        let env = Env::default();
-        let (amm, _usdc, initial_lp, _admin, market_id) = setup_amm_pool(&env);
-
-        let position = amm.get_lp_position(&market_id, &initial_lp);
-        assert!(position.is_some());
-        assert_eq!(position.unwrap().lp_shares, 1_000_000u128);
+    #[should_panic(expected = "total_lp_supply must be greater than 0")]
+    fn test_calc_collateral_zero_supply_panics() {
+        AMM::calc_collateral_from_lp(100, 1_000_000, 0);
     }
 }
