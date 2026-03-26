@@ -2,8 +2,18 @@
 // One-time bootstrap initialization with full config validation
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, Address, Env,
+    contract, contracterror, contractevent, contractimpl, contracttype, Address, Env, Vec,
 };
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UserPosition {
+    pub market_id: u64,
+    pub outcome_id: u32,
+    pub holder: Address,
+    pub shares: i128,
+    pub redeemed: bool,
+}
 
 // ---------------------------------------------------------------------------
 // Storage keys
@@ -15,6 +25,8 @@ pub enum DataKey {
     Config,
     NextMarketId,
     EmergencyPause,
+    UserPosition(Address, u64, u32), // (holder, market_id, outcome_id)
+    UserMarketPositions(Address, u64), // (holder, market_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +78,8 @@ pub enum PredictionMarketError {
     InvalidMaxOutcomes = 5,
     /// dispute_bond must be > 0
     InvalidDisputeBond = 6,
+    /// Position not found for the given key
+    PositionNotFound = 7,
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +210,33 @@ impl PredictionMarketContract {
             .persistent()
             .get(&DataKey::EmergencyPause)
             .unwrap_or(false)
+    }
+
+    /// Returns the position for `(holder, market_id, outcome_id)`.
+    /// Errors with `PositionNotFound` if no position exists.
+    pub fn get_position(
+        env: Env,
+        holder: Address,
+        market_id: u64,
+        outcome_id: u32,
+    ) -> Result<UserPosition, PredictionMarketError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserPosition(holder, market_id, outcome_id))
+            .ok_or(PredictionMarketError::PositionNotFound)
+    }
+
+    /// Returns all outcome positions held by `holder` in `market_id`.
+    /// Returns an empty `Vec` if none exist.
+    pub fn get_user_market_positions(
+        env: Env,
+        holder: Address,
+        market_id: u64,
+    ) -> Vec<UserPosition> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserMarketPositions(holder, market_id))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 }
 
