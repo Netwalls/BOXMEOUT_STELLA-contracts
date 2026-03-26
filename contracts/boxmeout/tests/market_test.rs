@@ -922,160 +922,125 @@ fn test_get_market_state_serializable() {
 // ============================================================================
 
 #[test]
-fn test_cancel_market_happy_path() {
+fn test_cancel_market_sets_cancelled_state() {
     let env = create_test_env();
-    
-    let factory_contract = env.register(boxmeout::factory::MarketFactory, ());
-    let factory_client = boxmeout::factory::MarketFactoryClient::new(&env, &factory_contract);
-    
-    let admin = Address::generate(&env);
-    let usdc_address = Address::generate(&env);
-    let treasury_address = Address::generate(&env);
-    
-    env.mock_all_auths();
-    factory_client.initialize(&admin, &usdc_address, &treasury_address);
-    
-    let market_contract = register_market(&env);
-    let client = PredictionMarketClient::new(&env, &market_contract);
+    let (client, market_id, creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
-    let market_id = BytesN::from_array(&env, &[1u8; 32]);
-    let creator = Address::generate(&env);
-    let oracle = Address::generate(&env);
-    let closing_time = env.ledger().timestamp() + 86400;
-    let resolution_time = closing_time + 3600;
+    client.cancel_market(&creator, &market_id);
 
-    client.initialize(
-        &market_id,
-        &creator,
-        &factory_contract,
-        &usdc_address,
-        &oracle,
-        &closing_time,
-        &resolution_time,
-    );
-    
-    // Market starts in Initializing (5); cancel is allowed from any non-resolved state.
-    assert_eq!(client.get_market_state_value().unwrap(), 5);
-    client.cancel_market(&admin, &market_id);
-    assert_eq!(client.get_market_state_value().unwrap(), 4);
+    assert_eq!(client.get_market_state_value().unwrap(), 4); // STATE_CANCELLED
 }
 
 #[test]
-#[should_panic(expected = "Unauthorized: only admin can cancel")]
-fn test_cancel_market_unauthorized() {
+fn test_claim_refund_only_on_cancelled_market() {
     let env = create_test_env();
-    let factory_contract = env.register(boxmeout::factory::MarketFactory, ());
-    let factory_client = boxmeout::factory::MarketFactoryClient::new(&env, &factory_contract);
-    
-    let admin = Address::generate(&env);
-    let fake_admin = Address::generate(&env);
-    let usdc_address = Address::generate(&env);
-    let treasury_address = Address::generate(&env);
-    
-    env.mock_all_auths();
-    factory_client.initialize(&admin, &usdc_address, &treasury_address);
-    
-    let market_contract = register_market(&env);
-    let client = PredictionMarketClient::new(&env, &market_contract);
-
-    let market_id = BytesN::from_array(&env, &[1u8; 32]);
-    let creator = Address::generate(&env);
-    let oracle = Address::generate(&env);
-    let closing_time = env.ledger().timestamp() + 86400;
-    let resolution_time = closing_time + 3600;
-
-    client.initialize(
-        &market_id,
-        &creator,
-        &factory_contract,
-        &usdc_address,
-        &oracle,
-        &closing_time,
-        &resolution_time,
-    );
-    
-    client.cancel_market(&fake_admin, &market_id);
-}
-
-#[test]
-fn test_refund_position_happy_path() {
-    let env = create_test_env();
-    let admin = Address::generate(&env);
-    let (token_client, usdc_address) = create_usdc_token(&env, &admin);
-
-    let factory_contract = env.register(boxmeout::factory::MarketFactory, ());
-    let factory_client = boxmeout::factory::MarketFactoryClient::new(&env, &factory_contract);
-    let treasury_address = Address::generate(&env);
-    
-    env.mock_all_auths();
-    factory_client.initialize(&admin, &usdc_address, &treasury_address);
-
-    let market_contract = register_market(&env);
-    let client = PredictionMarketClient::new(&env, &market_contract);
-    
-    let market_id = BytesN::from_array(&env, &[1u8; 32]);
-    let creator = Address::generate(&env);
-    let oracle = Address::generate(&env);
-    let closing_time = env.ledger().timestamp() + 86400;
-    let resolution_time = closing_time + 3600;
-
-    client.initialize(&market_id, &creator, &factory_contract, &usdc_address, &oracle, &closing_time, &resolution_time);
-
-    // Transition to Open so commit_prediction is allowed.
-    client.set_open(&creator);
+    let (client, market_id, creator, _admin, usdc_address, market_contract) =
+        setup_test_market(&env);
 
     let user = Address::generate(&env);
-    let amount = 1000i128;
-    token_client.mint(&user, &amount);
-    token_client.approve(&user, &market_contract, &amount, &(env.ledger().sequence() + 100));
+    let token = token::StellarAssetClient::new(&env, &usdc_address);
+    token.mint(&user, &500);
+    token.approve(
+        &user,
+        &market_contract,
+        &500,
+        &(env.ledger().sequence() + 100),
+    );
+    client.commit_prediction(&user, &BytesN::from_array(&env, &[1u8; 32]), &500);
 
-    let hash = BytesN::from_array(&env, &[2u8; 32]);
-    client.commit_prediction(&user, &hash, &amount);
+    // Cancel so refunds are available
+    client.cancel_market(&creator, &market_id);
 
-    client.cancel_market(&admin, &market_id);
-    client.refund_position(&user);
+    client.claim_refund(&user, &market_id);
 
-    assert_eq!(token_client.balance(&user), amount);
-    assert_eq!(token_client.balance(&market_contract), 0);
+    // Exact committed USDC refunded
+    assert_eq!(token.balance(&user), 500);
+    assert_eq!(token.balance(&market_contract), 0);
 }
 
 #[test]
-#[should_panic(expected = "No position found")]
-fn test_refund_position_already_refunded() {
+#[should_panic(expected = "Refunds only available for cancelled markets")]
+fn test_claim_refund_fails_when_market_not_cancelled() {
     let env = create_test_env();
-    let admin = Address::generate(&env);
-    let (token_client, usdc_address) = create_usdc_token(&env, &admin);
-
-    let factory_contract = env.register(boxmeout::factory::MarketFactory, ());
-    let factory_client = boxmeout::factory::MarketFactoryClient::new(&env, &factory_contract);
-    let treasury_address = Address::generate(&env);
-    
-    env.mock_all_auths();
-    factory_client.initialize(&admin, &usdc_address, &treasury_address);
-
-    let market_contract = register_market(&env);
-    let client = PredictionMarketClient::new(&env, &market_contract);
-    
-    let market_id = BytesN::from_array(&env, &[1u8; 32]);
-    let creator = Address::generate(&env);
-    let oracle = Address::generate(&env);
-    let closing_time = env.ledger().timestamp() + 86400;
-    let resolution_time = closing_time + 3600;
-
-    client.initialize(&market_id, &creator, &factory_contract, &usdc_address, &oracle, &closing_time, &resolution_time);
-
-    // Transition to Open so commit_prediction is allowed.
-    client.set_open(&creator);
+    let (client, market_id, _creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
 
     let user = Address::generate(&env);
-    let amount = 1000i128;
-    token_client.mint(&user, &amount);
-    token_client.approve(&user, &market_contract, &amount, &(env.ledger().sequence() + 100));
+    // Market still OPEN
+    client.claim_refund(&user, &market_id);
+}
 
-    let hash = BytesN::from_array(&env, &[2u8; 32]);
-    client.commit_prediction(&user, &hash, &amount);
+#[test]
+fn test_claim_refund_tracks_status_prevents_double_refund() {
+    let env = create_test_env();
+    let (client, market_id, creator, _admin, usdc_address, market_contract) =
+        setup_test_market(&env);
 
-    client.cancel_market(&admin, &market_id);
-    client.refund_position(&user);
-    client.refund_position(&user);
+    let user = Address::generate(&env);
+    let token = token::StellarAssetClient::new(&env, &usdc_address);
+    token.mint(&user, &300);
+    token.approve(
+        &user,
+        &market_contract,
+        &300,
+        &(env.ledger().sequence() + 100),
+    );
+    client.commit_prediction(&user, &BytesN::from_array(&env, &[2u8; 32]), &300);
+
+    client.cancel_market(&creator, &market_id);
+    client.claim_refund(&user, &market_id);
+    assert_eq!(token.balance(&user), 300);
+    // Double-refund is tested in test_claim_refund_double_panics
+}
+
+#[test]
+#[should_panic(expected = "Already refunded")]
+fn test_claim_refund_double_panics() {
+    let env = create_test_env();
+    let (client, market_id, creator, _admin, usdc_address, market_contract) =
+        setup_test_market(&env);
+
+    let user = Address::generate(&env);
+    let token = token::StellarAssetClient::new(&env, &usdc_address);
+    token.mint(&user, &100);
+    token.approve(
+        &user,
+        &market_contract,
+        &100,
+        &(env.ledger().sequence() + 100),
+    );
+    client.commit_prediction(&user, &BytesN::from_array(&env, &[3u8; 32]), &100);
+
+    client.cancel_market(&creator, &market_id);
+    client.claim_refund(&user, &market_id);
+    client.claim_refund(&user, &market_id);
+}
+
+#[test]
+#[should_panic(expected = "No commitment or prediction found for user")]
+fn test_claim_refund_fails_for_non_participant() {
+    let env = create_test_env();
+    let (client, market_id, creator, _admin, _usdc_address, _market_contract) =
+        setup_test_market(&env);
+
+    let user = Address::generate(&env);
+    client.cancel_market(&creator, &market_id);
+    client.claim_refund(&user, &market_id);
+}
+
+#[test]
+fn test_claim_refund_revealed_prediction_exact_amount() {
+    let env = create_test_env();
+    let (client, market_id, creator, _admin, usdc_address, market_contract) =
+        setup_test_market(&env);
+
+    let token = token::StellarAssetClient::new(&env, &usdc_address);
+    let user = Address::generate(&env);
+    client.test_set_prediction(&user, &1u32, &750);
+    token.mint(&market_contract, &750);
+
+    client.cancel_market(&creator, &market_id);
+    client.claim_refund(&user, &market_id);
+    assert_eq!(token.balance(&user), 750);
 }

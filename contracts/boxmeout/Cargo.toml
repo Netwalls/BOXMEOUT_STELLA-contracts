@@ -19,8 +19,9 @@ oracle = []
 amm = []
 factory = []
 treasury = []
+prediction_market = []
 # Test feature to enable all contracts for integration tests
-testutils = ["market", "oracle", "amm", "factory", "treasury"]
+testutils = ["market", "oracle", "amm", "factory", "treasury", "prediction_market"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
@@ -54,4 +55,8 @@ required-features = ["testutils"]
 
 [[test]]
 name = "treasury_test"
+required-features = ["testutils"]
+
+[[test]]
+name = "prediction_market_test"
 required-features = ["testutils"]
