@@ -25,6 +25,15 @@ pub struct LpPosition {
     pub fees_claimed: i128,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AmmPool {
+    pub market_id: u64,
+    pub reserves: Vec<i128>,
+    pub invariant_k: i128,
+    pub total_collateral: i128,
+}
+
 // ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
@@ -38,6 +47,7 @@ pub enum DataKey {
     UserPosition(Address, u64, u32), // (holder, market_id, outcome_id)
     UserMarketPositions(Address, u64), // (holder, market_id)
     LpPosition(Address, u64),          // (provider, market_id)
+    AmmPool(u64),                      // market_id
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +103,8 @@ pub enum PredictionMarketError {
     PositionNotFound = 7,
     /// LP position not found for the given key
     LpPositionNotFound = 8,
+    /// AMM pool not initialized for the given market
+    PoolNotInitialized = 9,
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +275,18 @@ impl PredictionMarketContract {
             .persistent()
             .get(&DataKey::LpPosition(provider, market_id))
             .ok_or(PredictionMarketError::LpPositionNotFound)
+    }
+
+    /// Returns the AMM pool state for `market_id`.
+    /// Errors with `PoolNotInitialized` if absent.
+    pub fn get_amm_pool(
+        env: Env,
+        market_id: u64,
+    ) -> Result<AmmPool, PredictionMarketError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AmmPool(market_id))
+            .ok_or(PredictionMarketError::PoolNotInitialized)
     }
 }
 
