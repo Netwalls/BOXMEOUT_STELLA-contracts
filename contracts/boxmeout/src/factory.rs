@@ -148,11 +148,6 @@ impl MarketFactory {
             .expect("Treasury not set")
     }
 
-    /// Get factory admin address
-    pub fn get_admin(env: Env) -> Address {
-        get_admin(&env)
-    }
-
     // -----------------------------------------------------------------------
     // Operator role management
     // -----------------------------------------------------------------------
