@@ -32,12 +32,19 @@ pub enum DataKey {
     TotalSharesOutstanding(BytesN<32>, u32),
     /// Number of outcomes for a market
     NumOutcomes(BytesN<32>),
+    /// Per-market oracle override (overrides Config.oracle when present)
+    MarketOracle(BytesN<32>),
+    /// Per-market resolution deadline (unix timestamp)
+    ResolutionDeadline(BytesN<32>),
+    /// Persisted oracle report
+    OracleReport(BytesN<32>),
 }
 
 // Market state constants
 pub const MARKET_OPEN: u32 = 0;
 pub const MARKET_CLOSED: u32 = 1;
 pub const MARKET_RESOLVED: u32 = 2;
+pub const MARKET_REPORTED: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Config struct – persisted atomically on first init
@@ -106,6 +113,12 @@ pub enum PredictionMarketError {
     InvalidCollateral = 14,
     /// caller does not hold enough shares of every outcome to merge
     InsufficientSharesForMerge = 15,
+    /// Resolution deadline has not been reached yet
+    TooEarlyToReport = 16,
+    /// Market is not in a reportable state
+    MarketNotReportable = 17,
+    /// proposed_outcome_id is out of range
+    InvalidOutcome = 18,
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +130,15 @@ pub enum PredictionMarketError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Position {
     pub shares: i128,
+}
+
+/// Oracle report persisted during phase-1 resolution.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleReport {
+    pub oracle: Address,
+    pub proposed_outcome: u32,
+    pub reported_at: u64,
 }
 
 /// Returned by sell_shares to summarise the completed trade.
@@ -175,6 +197,14 @@ pub mod events {
         pub caller: Address,
         pub shares: i128,
         pub num_outcomes: u32,
+    }
+
+    #[contractevent]
+    pub struct OutcomeReported {
+        pub market_id: BytesN<32>,
+        pub oracle: Address,
+        pub proposed_outcome: u32,
+        pub reported_at: u64,
     }
 }
 
@@ -665,6 +695,95 @@ impl PredictionMarketContract {
         Self::merge_positions(env, market_id, caller, shares)
     }
 
+    // ── report_outcome ───────────────────────────────────────────────────────
+
+    /// Phase-1 resolution: oracle proposes a winning outcome, starting the
+    /// dispute window.  Market transitions Open/Closed → Reported.
+    pub fn report_outcome(
+        env: Env,
+        market_id: BytesN<32>,
+        proposed_outcome: u32,
+    ) -> Result<(), PredictionMarketError> {
+        // Resolve oracle: per-market override takes precedence over Config
+        let config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::MarketNotOpen)?;
+        let oracle: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MarketOracle(market_id.clone()))
+            .unwrap_or(config.oracle.clone());
+
+        // Require oracle auth
+        oracle.require_auth();
+
+        // Market must be Closed, or Open with betting_close_time elapsed
+        let state: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MarketState(market_id.clone()))
+            .unwrap_or(MARKET_OPEN);
+        let betting_close: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BettingCloseTime(market_id.clone()))
+            .unwrap_or(0);
+        let now = env.ledger().timestamp();
+        let is_closed = state == MARKET_CLOSED;
+        let is_open_past_close = state == MARKET_OPEN && now >= betting_close;
+        if !is_closed && !is_open_past_close {
+            return Err(PredictionMarketError::MarketNotReportable);
+        }
+
+        // now >= resolution_deadline
+        let deadline: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ResolutionDeadline(market_id.clone()))
+            .unwrap_or(betting_close); // default: same as betting close
+        if now < deadline {
+            return Err(PredictionMarketError::TooEarlyToReport);
+        }
+
+        // Validate proposed_outcome < num_outcomes
+        let num_outcomes: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NumOutcomes(market_id.clone()))
+            .unwrap_or(2);
+        if proposed_outcome >= num_outcomes {
+            return Err(PredictionMarketError::InvalidOutcome);
+        }
+
+        // Persist OracleReport
+        let report = OracleReport {
+            oracle: oracle.clone(),
+            proposed_outcome,
+            reported_at: now,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::OracleReport(market_id.clone()), &report);
+
+        // Transition market → Reported
+        env.storage()
+            .persistent()
+            .set(&DataKey::MarketState(market_id.clone()), &MARKET_REPORTED);
+
+        // Emit event
+        events::OutcomeReported {
+            market_id,
+            oracle,
+            proposed_outcome,
+            reported_at: now,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
     // ── Internal AMM helpers ─────────────────────────────────────────────────
 
     fn get_reserves(env: &Env, market_id: &BytesN<32>) -> (i128, i128) {
@@ -759,6 +878,30 @@ impl PredictionMarketContract {
         env.storage()
             .persistent()
             .set(&DataKey::NumOutcomes(market_id), &num_outcomes);
+    }
+
+    /// Test helper: set resolution deadline for a market.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn test_set_resolution_deadline(env: Env, market_id: BytesN<32>, deadline: u64) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::ResolutionDeadline(market_id), &deadline);
+    }
+
+    /// Test helper: set per-market oracle override.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn test_set_market_oracle(env: Env, market_id: BytesN<32>, oracle: Address) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::MarketOracle(market_id), &oracle);
+    }
+
+    /// Test helper: read the persisted OracleReport.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn test_get_oracle_report(env: Env, market_id: BytesN<32>) -> Option<OracleReport> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::OracleReport(market_id))
     }
 }
 
@@ -1731,5 +1874,186 @@ mod merge_positions_tests {
 
         let result = client.try_merge_positions(&market_id, &caller, &0i128);
         assert_eq!(result, Err(Ok(PredictionMarketError::InvalidCollateral)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// report_outcome unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod report_outcome_tests {
+    use super::*;
+    use soroban_sdk::{testutils::{Address as _, Ledger}, Address, BytesN, Env};
+
+    /// Registers + initialises the contract, seeds a market in Closed state
+    /// with a resolution deadline, and returns the oracle address.
+    fn setup(
+        state: u32,
+        betting_close: u64,
+        resolution_deadline: u64,
+        num_outcomes: u32,
+    ) -> (
+        Env,
+        PredictionMarketContractClient<'static>,
+        Address, // cid
+        Address, // oracle
+        BytesN<32>,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        let cid = env.register(PredictionMarketContract, ());
+        let client = PredictionMarketContractClient::new(&env, &cid);
+
+        client
+            .try_initialize(
+                &admin, &treasury, &oracle, &token,
+                &200u32, &100u32, &1_000i128, &100i128, &num_outcomes, &500i128,
+            )
+            .unwrap();
+
+        let market_id = BytesN::from_array(&env, &[4u8; 32]);
+        let creator = Address::generate(&env);
+
+        // Seed market state, betting close, and reserves via existing helper
+        client.test_setup_market(&market_id, &creator, &betting_close, &500_000, &500_000);
+        // Override state to whatever the test needs
+        env.as_contract(&cid, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::MarketState(market_id.clone()), &state);
+        });
+        client.test_set_num_outcomes(&market_id, &num_outcomes);
+        client.test_set_resolution_deadline(&market_id, &resolution_deadline);
+
+        (env, client, cid, oracle, market_id)
+    }
+
+    // ── happy path: Closed market ─────────────────────────────────────────────
+
+    #[test]
+    fn test_report_outcome_closed_market_succeeds() {
+        // betting_close=1000, deadline=2000, now=2500 → Closed, past deadline
+        let (env, client, _cid, _oracle, market_id) =
+            setup(MARKET_CLOSED, 1_000, 2_000, 2);
+        env.ledger().with_mut(|l| l.timestamp = 2_500);
+
+        client.report_outcome(&market_id, &1u32).unwrap();
+
+        // State → Reported
+        let state: u32 = env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::MarketState(market_id.clone()))
+                .unwrap()
+        });
+        assert_eq!(state, MARKET_REPORTED);
+
+        // Report persisted
+        let report = client.test_get_oracle_report(&market_id).unwrap();
+        assert_eq!(report.proposed_outcome, 1);
+    }
+
+    #[test]
+    fn test_report_outcome_open_past_betting_close_succeeds() {
+        // state=Open, betting_close=1000, deadline=1000, now=1500
+        let (env, client, _cid, _oracle, market_id) =
+            setup(MARKET_OPEN, 1_000, 1_000, 2);
+        env.ledger().with_mut(|l| l.timestamp = 1_500);
+
+        client.report_outcome(&market_id, &0u32).unwrap();
+
+        let report = client.test_get_oracle_report(&market_id).unwrap();
+        assert_eq!(report.proposed_outcome, 0);
+    }
+
+    #[test]
+    fn test_report_outcome_emits_event() {
+        let (env, client, _cid, _oracle, market_id) =
+            setup(MARKET_CLOSED, 1_000, 2_000, 2);
+        env.ledger().with_mut(|l| l.timestamp = 2_500);
+
+        client.report_outcome(&market_id, &0u32).unwrap();
+        assert!(!env.events().all().is_empty());
+    }
+
+    #[test]
+    fn test_report_uses_market_oracle_override() {
+        let (env, client, _cid, _default_oracle, market_id) =
+            setup(MARKET_CLOSED, 1_000, 2_000, 2);
+        env.ledger().with_mut(|l| l.timestamp = 2_500);
+
+        let custom_oracle = Address::generate(&env);
+        client.test_set_market_oracle(&market_id, &custom_oracle);
+
+        // Should succeed using custom_oracle auth (mock_all_auths covers it)
+        client.report_outcome(&market_id, &1u32).unwrap();
+        let report = client.test_get_oracle_report(&market_id).unwrap();
+        assert_eq!(report.oracle, custom_oracle);
+    }
+
+    // ── report before deadline rejected ──────────────────────────────────────
+
+    #[test]
+    fn test_report_before_deadline_rejected() {
+        // deadline=5000, now=3000 → too early
+        let (env, client, _cid, _oracle, market_id) =
+            setup(MARKET_CLOSED, 1_000, 5_000, 2);
+        env.ledger().with_mut(|l| l.timestamp = 3_000);
+
+        let result = client.try_report_outcome(&market_id, &1u32);
+        assert_eq!(result, Err(Ok(PredictionMarketError::TooEarlyToReport)));
+    }
+
+    // ── invalid outcome rejected ──────────────────────────────────────────────
+
+    #[test]
+    fn test_invalid_outcome_rejected() {
+        // num_outcomes=2, valid ids are 0 and 1; propose 2 → invalid
+        let (env, client, _cid, _oracle, market_id) =
+            setup(MARKET_CLOSED, 1_000, 2_000, 2);
+        env.ledger().with_mut(|l| l.timestamp = 2_500);
+
+        let result = client.try_report_outcome(&market_id, &2u32);
+        assert_eq!(result, Err(Ok(PredictionMarketError::InvalidOutcome)));
+    }
+
+    #[test]
+    fn test_invalid_outcome_large_id_rejected() {
+        let (env, client, _cid, _oracle, market_id) =
+            setup(MARKET_CLOSED, 1_000, 2_000, 2);
+        env.ledger().with_mut(|l| l.timestamp = 2_500);
+
+        let result = client.try_report_outcome(&market_id, &99u32);
+        assert_eq!(result, Err(Ok(PredictionMarketError::InvalidOutcome)));
+    }
+
+    // ── market not in reportable state ───────────────────────────────────────
+
+    #[test]
+    fn test_report_on_open_market_before_betting_close_rejected() {
+        // state=Open, betting_close=5000, now=2000 → not yet closed
+        let (env, client, _cid, _oracle, market_id) =
+            setup(MARKET_OPEN, 5_000, 1_000, 2);
+        env.ledger().with_mut(|l| l.timestamp = 2_000);
+
+        let result = client.try_report_outcome(&market_id, &1u32);
+        assert_eq!(result, Err(Ok(PredictionMarketError::MarketNotReportable)));
+    }
+
+    #[test]
+    fn test_report_on_already_resolved_market_rejected() {
+        let (env, client, _cid, _oracle, market_id) =
+            setup(MARKET_RESOLVED, 1_000, 2_000, 2);
+        env.ledger().with_mut(|l| l.timestamp = 2_500);
+
+        let result = client.try_report_outcome(&market_id, &0u32);
+        assert_eq!(result, Err(Ok(PredictionMarketError::MarketNotReportable)));
     }
 }
