@@ -89,6 +89,8 @@ const REFUNDED_PREFIX: &str = "refunded";
 const WINNING_OUTCOME_KEY: &str = "winning_outcome";
 const WINNER_SHARES_KEY: &str = "winner_shares";
 const LOSER_SHARES_KEY: &str = "loser_shares";
+const VOLUME_24H_KEY: &str = "volume_24h";
+const LAST_TRADE_AT_KEY: &str = "last_trade_at";
 
 /// Market states
 const STATE_OPEN: u32 = 0;
@@ -126,6 +128,8 @@ pub enum MarketError {
     InvalidReveal = 11,
     /// User has already revealed their prediction
     DuplicateReveal = 12,
+    /// Market not found
+    MarketNotFound = 13,
 }
 
 /// Commitment record for commit-reveal scheme
@@ -196,6 +200,22 @@ pub struct UserPredictionResult {
     pub status: u32,
     /// 0=NO, 1=YES when revealed; PREDICTION_OUTCOME_NONE when committed
     pub predicted_outcome: u32,
+}
+
+/// Market statistics for analytics
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketStats {
+    /// Total volume ever committed/revealed
+    pub total_volume: i128,
+    /// Volume in the last 24 hours (rolling, based on last_trade_at)
+    pub volume_24h: i128,
+    /// Number of unique traders (committed + revealed)
+    pub unique_traders: u32,
+    /// Current open interest: funds locked in unresolved positions (yes_pool + no_pool)
+    pub open_interest: i128,
+    /// Timestamp of the last trade (commit or reveal), 0 if none
+    pub last_trade_at: u64,
 }
 
 /// Market state summary for backend sync
@@ -410,6 +430,30 @@ impl PredictionMarket {
             .persistent()
             .set(&Symbol::new(&env, PENDING_COUNT_KEY), &(pending_count + 1));
 
+        // Update volume_24h and last_trade_at
+        let last_trade_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, LAST_TRADE_AT_KEY))
+            .unwrap_or(0);
+        let volume_24h: i128 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, VOLUME_24H_KEY))
+            .unwrap_or(0);
+        // Reset 24h window if last trade was more than 24h ago
+        let new_volume_24h = if current_time.saturating_sub(last_trade_at) >= 86400 {
+            amount
+        } else {
+            volume_24h + amount
+        };
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, VOLUME_24H_KEY), &new_volume_24h);
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, LAST_TRADE_AT_KEY), &current_time);
+
         // Emit CommitmentMade event
         CommitmentMadeEvent {
             user,
@@ -594,6 +638,29 @@ impl PredictionMarket {
             &Symbol::new(&env, TOTAL_VOLUME_KEY),
             &(total_volume + amount),
         );
+
+        // Update volume_24h and last_trade_at on reveal
+        let last_trade_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, LAST_TRADE_AT_KEY))
+            .unwrap_or(0);
+        let volume_24h: i128 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, VOLUME_24H_KEY))
+            .unwrap_or(0);
+        let new_volume_24h = if current_time.saturating_sub(last_trade_at) >= 86400 {
+            amount
+        } else {
+            volume_24h + amount
+        };
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, VOLUME_24H_KEY), &new_volume_24h);
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, LAST_TRADE_AT_KEY), &current_time);
 
         // 12. Decrement pending count
         let pending_count: u32 = env
@@ -1182,6 +1249,73 @@ impl PredictionMarket {
         }
 
         PaginatedPredictionsResult { items, total }
+    }
+
+    /// Get market statistics: volume, participants, open interest
+    ///
+    /// Returns MarketStats with total_volume, volume_24h, unique_traders,
+    /// open_interest, and last_trade_at.
+    /// Returns MarketNotFound if the market has not been initialized.
+    pub fn get_market_stats(
+        env: Env,
+        _market_id: BytesN<32>,
+    ) -> Result<MarketStats, MarketError> {
+        // Guard: market must be initialized
+        if !env
+            .storage()
+            .persistent()
+            .has(&Symbol::new(&env, MARKET_STATE_KEY))
+        {
+            return Err(MarketError::MarketNotFound);
+        }
+
+        let total_volume: i128 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, TOTAL_VOLUME_KEY))
+            .unwrap_or(0);
+
+        let volume_24h: i128 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, VOLUME_24H_KEY))
+            .unwrap_or(0);
+
+        let last_trade_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, LAST_TRADE_AT_KEY))
+            .unwrap_or(0);
+
+        // unique_traders = all participants (committed + revealed)
+        let unique_traders: u32 = env
+            .storage()
+            .persistent()
+            .get::<_, soroban_sdk::Vec<Address>>(&Symbol::new(&env, PARTICIPANTS_KEY))
+            .map(|v| v.len())
+            .unwrap_or(0);
+
+        let yes_pool: i128 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, YES_POOL_KEY))
+            .unwrap_or(0);
+
+        let no_pool: i128 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, NO_POOL_KEY))
+            .unwrap_or(0);
+
+        let open_interest = yes_pool + no_pool;
+
+        Ok(MarketStats {
+            total_volume,
+            volume_24h,
+            unique_traders,
+            open_interest,
+            last_trade_at,
+        })
     }
 
     /// Get market leaderboard (top predictors by winnings)
