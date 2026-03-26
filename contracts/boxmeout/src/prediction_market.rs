@@ -44,8 +44,10 @@ pub struct Config {
     pub max_outcomes: u32,
     /// Bond required to open a dispute (in token units)
     pub dispute_bond: i128,
+
     /// Whether the contract is currently emergency-paused
     pub emergency_paused: bool,
+
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +70,7 @@ pub enum PredictionMarketError {
     InvalidMaxOutcomes = 5,
     /// dispute_bond must be > 0
     InvalidDisputeBond = 6,
+
     /// Caller is not the admin
     Unauthorized = 7,
     /// Contract has not been initialized yet
@@ -78,6 +81,7 @@ pub enum PredictionMarketError {
     AlreadyPaused = 10,
     /// Unpause requested but contract is not paused
     AlreadyUnpaused = 11,
+
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +101,7 @@ pub mod events {
         pub creator_fee_bps: u32,
     }
 
+
     #[contractevent]
     pub struct DisputeBondUpdated {
         pub admin: Address,
@@ -115,6 +120,7 @@ pub mod events {
         pub admin: Address,
         pub timestamp: u64,
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +190,9 @@ impl PredictionMarketContract {
             min_trade,
             max_outcomes,
             dispute_bond,
+
             emergency_paused: false,
+
         };
 
         // ── Atomic writes (all succeed or none) ──────────────────────────────
@@ -229,6 +237,7 @@ impl PredictionMarketContract {
             .get(&DataKey::EmergencyPause)
             .unwrap_or(false)
     }
+
 
     /// Admin-only: update the minimum dispute bond.
     ///
@@ -384,6 +393,7 @@ impl PredictionMarketContract {
         // ... actual buy logic would follow here ...
         Ok(())
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +738,7 @@ mod tests {
         let client = PredictionMarketContractClient::new(&env, &cid);
         assert!(client.get_config().is_none());
     }
+
 
 
     // =========================================================================
@@ -1116,4 +1127,5 @@ mod tests {
         let client = PredictionMarketContractClient::new(&env, &cid);
         assert!(!client.is_paused());
     }
+
 }
