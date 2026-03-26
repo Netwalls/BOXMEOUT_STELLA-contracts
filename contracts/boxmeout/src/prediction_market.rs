@@ -15,6 +15,16 @@ pub struct UserPosition {
     pub redeemed: bool,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LpPosition {
+    pub market_id: u64,
+    pub provider: Address,
+    pub lp_shares: i128,
+    pub collateral_contributed: i128,
+    pub fees_claimed: i128,
+}
+
 // ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
@@ -27,6 +37,7 @@ pub enum DataKey {
     EmergencyPause,
     UserPosition(Address, u64, u32), // (holder, market_id, outcome_id)
     UserMarketPositions(Address, u64), // (holder, market_id)
+    LpPosition(Address, u64),          // (provider, market_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +91,8 @@ pub enum PredictionMarketError {
     InvalidDisputeBond = 6,
     /// Position not found for the given key
     PositionNotFound = 7,
+    /// LP position not found for the given key
+    LpPositionNotFound = 8,
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +250,19 @@ impl PredictionMarketContract {
             .persistent()
             .get(&DataKey::UserMarketPositions(holder, market_id))
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Returns the LP position for `(provider, market_id)`.
+    /// Errors with `LpPositionNotFound` if absent.
+    pub fn get_lp_position(
+        env: Env,
+        provider: Address,
+        market_id: u64,
+    ) -> Result<LpPosition, PredictionMarketError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LpPosition(provider, market_id))
+            .ok_or(PredictionMarketError::LpPositionNotFound)
     }
 }
 
