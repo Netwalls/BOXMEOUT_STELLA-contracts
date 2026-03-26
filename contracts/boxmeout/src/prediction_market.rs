@@ -28,6 +28,10 @@ pub enum DataKey {
     YesReserve(BytesN<32>),
     /// Per-market AMM no reserve
     NoReserve(BytesN<32>),
+    /// Total shares outstanding per outcome: (market_id, outcome)
+    TotalSharesOutstanding(BytesN<32>, u32),
+    /// Number of outcomes for a market
+    NumOutcomes(BytesN<32>),
 }
 
 // Market state constants
@@ -98,6 +102,10 @@ pub enum PredictionMarketError {
     SlippageExceeded = 12,
     /// Arithmetic overflow
     Overflow = 13,
+    /// collateral must be > 0
+    InvalidCollateral = 14,
+    /// caller does not hold enough shares of every outcome to merge
+    InsufficientSharesForMerge = 15,
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +159,14 @@ pub mod events {
         pub net_collateral_out: i128,
         pub protocol_fee: i128,
         pub creator_fee: i128,
+    }
+
+    #[contractevent]
+    pub struct PositionSplit {
+        pub market_id: BytesN<32>,
+        pub caller: Address,
+        pub collateral: i128,
+        pub num_outcomes: u32,
     }
 }
 
@@ -450,6 +466,182 @@ impl PredictionMarketContract {
         })
     }
 
+    // ── split_position / merge_position ─────────────────────────────────────
+
+    /// Split `collateral` units into 1 share of every outcome.
+    /// No AMM interaction — always a 1:1 value trade with no price impact or fee.
+    pub fn split_position(
+        env: Env,
+        market_id: BytesN<32>,
+        caller: Address,
+        collateral: i128,
+    ) -> Result<(), PredictionMarketError> {
+        // 1. Global pause guard
+        if env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&DataKey::EmergencyPause)
+            .unwrap_or(false)
+        {
+            return Err(PredictionMarketError::ContractPaused);
+        }
+
+        // 2. Caller auth
+        caller.require_auth();
+
+        // 3. Market must be Open
+        let market_state: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MarketState(market_id.clone()))
+            .unwrap_or(MARKET_CLOSED);
+        if market_state != MARKET_OPEN {
+            return Err(PredictionMarketError::MarketNotOpen);
+        }
+
+        // 4. Validate collateral > 0
+        if collateral <= 0 {
+            return Err(PredictionMarketError::InvalidCollateral);
+        }
+
+        // 5. Transfer collateral from caller to contract
+        let config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::MarketNotOpen)?;
+        token::Client::new(&env, &config.token).transfer(
+            &caller,
+            &env.current_contract_address(),
+            &collateral,
+        );
+
+        // 6 & 7. Mint 1 share per outcome and update total_shares_outstanding
+        let num_outcomes: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NumOutcomes(market_id.clone()))
+            .unwrap_or(2); // default binary market
+
+        for outcome in 0..num_outcomes {
+            let pos_key = DataKey::Position(market_id.clone(), caller.clone(), outcome);
+            let current: i128 = env
+                .storage()
+                .persistent()
+                .get(&pos_key)
+                .map(|p: Position| p.shares)
+                .unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&pos_key, &Position { shares: current + collateral });
+
+            let ts_key = DataKey::TotalSharesOutstanding(market_id.clone(), outcome);
+            let total: i128 = env.storage().persistent().get(&ts_key).unwrap_or(0);
+            env.storage().persistent().set(&ts_key, &(total + collateral));
+        }
+
+        // 8. Emit event
+        events::PositionSplit {
+            market_id,
+            caller,
+            collateral,
+            num_outcomes,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Merge `shares` of every outcome back into `shares` units of collateral.
+    /// Inverse of split_position — no fee, no AMM interaction.
+    pub fn merge_position(
+        env: Env,
+        market_id: BytesN<32>,
+        caller: Address,
+        shares: i128,
+    ) -> Result<(), PredictionMarketError> {
+        if env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&DataKey::EmergencyPause)
+            .unwrap_or(false)
+        {
+            return Err(PredictionMarketError::ContractPaused);
+        }
+
+        caller.require_auth();
+
+        let market_state: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MarketState(market_id.clone()))
+            .unwrap_or(MARKET_CLOSED);
+        if market_state != MARKET_OPEN {
+            return Err(PredictionMarketError::MarketNotOpen);
+        }
+
+        if shares <= 0 {
+            return Err(PredictionMarketError::InvalidCollateral);
+        }
+
+        let num_outcomes: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NumOutcomes(market_id.clone()))
+            .unwrap_or(2);
+
+        // Validate caller holds >= shares of every outcome before mutating
+        for outcome in 0..num_outcomes {
+            let pos_key = DataKey::Position(market_id.clone(), caller.clone(), outcome);
+            let held: i128 = env
+                .storage()
+                .persistent()
+                .get(&pos_key)
+                .map(|p: Position| p.shares)
+                .unwrap_or(0);
+            if held < shares {
+                return Err(PredictionMarketError::InsufficientSharesForMerge);
+            }
+        }
+
+        // Burn shares and update totals
+        for outcome in 0..num_outcomes {
+            let pos_key = DataKey::Position(market_id.clone(), caller.clone(), outcome);
+            let held: i128 = env
+                .storage()
+                .persistent()
+                .get(&pos_key)
+                .map(|p: Position| p.shares)
+                .unwrap_or(0);
+            let new_shares = held - shares;
+            if new_shares == 0 {
+                env.storage().persistent().remove(&pos_key);
+            } else {
+                env.storage()
+                    .persistent()
+                    .set(&pos_key, &Position { shares: new_shares });
+            }
+
+            let ts_key = DataKey::TotalSharesOutstanding(market_id.clone(), outcome);
+            let total: i128 = env.storage().persistent().get(&ts_key).unwrap_or(0);
+            env.storage().persistent().set(&ts_key, &(total - shares));
+        }
+
+        // Return collateral to caller
+        let config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::MarketNotOpen)?;
+        token::Client::new(&env, &config.token).transfer(
+            &env.current_contract_address(),
+            &caller,
+            &shares,
+        );
+
+        Ok(())
+    }
+
     // ── Internal AMM helpers ─────────────────────────────────────────────────
 
     fn get_reserves(env: &Env, market_id: &BytesN<32>) -> (i128, i128) {
@@ -527,6 +719,23 @@ impl PredictionMarketContract {
     #[cfg(any(test, feature = "testutils"))]
     pub fn test_get_reserves(env: Env, market_id: BytesN<32>) -> (i128, i128) {
         Self::get_reserves(&env, &market_id)
+    }
+
+    /// Test helper: read total shares outstanding for an outcome.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn test_get_total_shares(env: Env, market_id: BytesN<32>, outcome: u32) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TotalSharesOutstanding(market_id, outcome))
+            .unwrap_or(0)
+    }
+
+    /// Test helper: set number of outcomes for a market.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn test_set_num_outcomes(env: Env, market_id: BytesN<32>, num_outcomes: u32) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::NumOutcomes(market_id), &num_outcomes);
     }
 }
 
@@ -1136,5 +1345,187 @@ mod sell_shares_tests {
         let result =
             client.try_sell_shares(&market_id, &seller, &1u32, &5_000i128, &0i128);
         assert_eq!(result, Err(Ok(PredictionMarketError::MarketNotOpen)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// split_position unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod split_position_tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, token, Address, BytesN, Env};
+
+    fn create_token<'a>(env: &Env, admin: &Address) -> token::StellarAssetClient<'a> {
+        let addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        token::StellarAssetClient::new(env, &addr)
+    }
+
+    /// Registers + initialises the contract, seeds an open market, mints
+    /// `caller_balance` collateral to `caller`, and returns everything needed.
+    fn setup(
+        num_outcomes: u32,
+        caller_balance: i128,
+    ) -> (
+        Env,
+        PredictionMarketContractClient<'static>,
+        Address, // contract id
+        Address, // caller
+        BytesN<32>,
+        token::StellarAssetClient<'static>,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let usdc = create_token(&env, &token_admin);
+
+        let cid = env.register(PredictionMarketContract, ());
+        let client = PredictionMarketContractClient::new(&env, &cid);
+
+        client
+            .try_initialize(
+                &admin,
+                &treasury,
+                &oracle,
+                &usdc.address,
+                &200u32,
+                &100u32,
+                &1_000i128,
+                &100i128,
+                &num_outcomes,
+                &500i128,
+            )
+            .unwrap();
+
+        let market_id = BytesN::from_array(&env, &[2u8; 32]);
+        let creator = Address::generate(&env);
+        client.test_setup_market(&market_id, &creator, &9_999_999u64, &500_000, &500_000);
+        client.test_set_num_outcomes(&market_id, &num_outcomes);
+
+        let caller = Address::generate(&env);
+        usdc.mint(&caller, &caller_balance);
+        // Also mint into contract so merge can pay back
+        usdc.mint(&cid, &caller_balance);
+
+        (env, client, cid, caller, market_id, usdc)
+    }
+
+    // ── happy path ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_split_mints_one_share_per_outcome() {
+        let (_env, client, _cid, caller, market_id, _usdc) = setup(2, 1_000);
+
+        client.split_position(&market_id, &caller, &1_000i128).unwrap();
+
+        // Both outcomes get 1_000 shares
+        assert_eq!(
+            client.test_get_position(&market_id, &caller, &0u32).unwrap().shares,
+            1_000
+        );
+        assert_eq!(
+            client.test_get_position(&market_id, &caller, &1u32).unwrap().shares,
+            1_000
+        );
+    }
+
+    #[test]
+    fn test_split_updates_total_shares_outstanding() {
+        let (_env, client, _cid, caller, market_id, _usdc) = setup(2, 500);
+
+        client.split_position(&market_id, &caller, &500i128).unwrap();
+
+        assert_eq!(client.test_get_total_shares(&market_id, &0u32), 500);
+        assert_eq!(client.test_get_total_shares(&market_id, &1u32), 500);
+    }
+
+    #[test]
+    fn test_split_transfers_collateral_to_contract() {
+        let (_env, client, cid, caller, market_id, usdc) = setup(2, 1_000);
+
+        let before = usdc.balance(&caller);
+        client.split_position(&market_id, &caller, &1_000i128).unwrap();
+        assert_eq!(usdc.balance(&caller), before - 1_000);
+        // contract received it (net: minted 1_000 extra above, so balance >= 1_000)
+        assert!(usdc.balance(&cid) >= 1_000);
+    }
+
+    #[test]
+    fn test_split_emits_event() {
+        let (env, client, _cid, caller, market_id, _usdc) = setup(2, 200);
+        client.split_position(&market_id, &caller, &200i128).unwrap();
+        assert!(!env.events().all().is_empty());
+    }
+
+    // ── split → merge returns original collateral ─────────────────────────────
+
+    #[test]
+    fn test_split_then_merge_returns_original_collateral() {
+        let (_env, client, _cid, caller, market_id, usdc) = setup(2, 1_000);
+
+        let before = usdc.balance(&caller);
+
+        client.split_position(&market_id, &caller, &1_000i128).unwrap();
+        assert_eq!(usdc.balance(&caller), before - 1_000);
+
+        client.merge_position(&market_id, &caller, &1_000i128).unwrap();
+        assert_eq!(usdc.balance(&caller), before);
+
+        // Positions cleaned up
+        assert!(client.test_get_position(&market_id, &caller, &0u32).is_none());
+        assert!(client.test_get_position(&market_id, &caller, &1u32).is_none());
+    }
+
+    // ── error cases ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_split_zero_collateral_rejected() {
+        let (_env, client, _cid, caller, market_id, _usdc) = setup(2, 1_000);
+        let result = client.try_split_position(&market_id, &caller, &0i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::InvalidCollateral)));
+    }
+
+    #[test]
+    fn test_split_market_not_open_rejected() {
+        let (env, client, cid, caller, market_id, _usdc) = setup(2, 1_000);
+        env.as_contract(&cid, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::MarketState(market_id.clone()), &MARKET_CLOSED);
+        });
+        let result = client.try_split_position(&market_id, &caller, &500i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::MarketNotOpen)));
+    }
+
+    #[test]
+    fn test_split_paused_rejected() {
+        let (env, client, cid, caller, market_id, _usdc) = setup(2, 1_000);
+        env.as_contract(&cid, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::EmergencyPause, &true);
+        });
+        let result = client.try_split_position(&market_id, &caller, &500i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_merge_insufficient_shares_rejected() {
+        let (_env, client, _cid, caller, market_id, _usdc) = setup(2, 1_000);
+
+        // Split 500, then try to merge 600
+        client.split_position(&market_id, &caller, &500i128).unwrap();
+        let result = client.try_merge_position(&market_id, &caller, &600i128);
+        assert_eq!(
+            result,
+            Err(Ok(PredictionMarketError::InsufficientSharesForMerge))
+        );
     }
 }
