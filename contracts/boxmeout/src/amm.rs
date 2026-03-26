@@ -927,10 +927,64 @@ impl AMM {
     }
 
     // TODO: Implement remaining AMM functions
-    // - add_liquidity()
     // - get_lp_position() / claim_lp_fees()
     // - calculate_spot_price()
     // - get_trade_history()
+
+    /// Calculate LP shares to mint for a new collateral deposit.
+    ///
+    /// - First deposit (`total_collateral == 0`): bootstraps 1:1 so the
+    ///   initial LP receives exactly `collateral_in` shares.
+    /// - Subsequent deposits: proportional to the existing pool using
+    ///   `math::mul_div` to avoid intermediate overflow:
+    ///   `shares = collateral_in * total_lp_supply / total_collateral`
+    ///
+    /// Panics if `collateral_in` is zero.
+    pub fn calc_lp_shares_to_mint(
+        collateral_in: u128,
+        total_collateral: u128,
+        total_lp_supply: u128,
+    ) -> u128 {
+        if collateral_in == 0 {
+            panic!("collateral_in must be greater than 0");
+        }
+        // Edge case: empty pool — first depositor gets 1:1 shares.
+        if total_collateral == 0 {
+            return collateral_in;
+        }
+        // Use mul_div to compute (collateral_in * total_lp_supply) / total_collateral
+        // without intermediate overflow.
+        crate::math::mul_div(
+            collateral_in as i128,
+            total_lp_supply as i128,
+            total_collateral as i128,
+        ) as u128
+    }
+
+    /// Calculate collateral to return when redeeming LP shares.
+    ///
+    /// Proportional to the caller's share of the pool:
+    ///   `collateral_out = lp_tokens * total_collateral / total_lp_supply`
+    ///
+    /// Uses `math::mul_div` to avoid intermediate overflow.
+    /// Panics if `lp_tokens` or `total_lp_supply` is zero.
+    pub fn calc_collateral_from_lp(
+        lp_tokens: u128,
+        total_collateral: u128,
+        total_lp_supply: u128,
+    ) -> u128 {
+        if lp_tokens == 0 {
+            panic!("lp_tokens must be greater than 0");
+        }
+        if total_lp_supply == 0 {
+            panic!("total_lp_supply must be greater than 0");
+        }
+        crate::math::mul_div(
+            lp_tokens as i128,
+            total_collateral as i128,
+            total_lp_supply as i128,
+        ) as u128
+    }
 }
 
 #[cfg(test)]
@@ -1033,5 +1087,73 @@ mod tests {
         assert_eq!(new_k, yes_after * no_after);
         assert_eq!(new_k, 562_500_000_000);
         assert!(new_k > old_k);
+    }
+
+    // ── Issue #45: calc_lp_shares_to_mint / calc_collateral_from_lp ──────────
+
+    #[test]
+    fn test_calc_lp_shares_first_deposit_is_one_to_one() {
+        // First depositor: total_collateral == 0 → shares == collateral_in
+        let shares = AMM::calc_lp_shares_to_mint(1_000_000, 0, 0);
+        assert_eq!(shares, 1_000_000);
+    }
+
+    #[test]
+    fn test_calc_lp_shares_proportional() {
+        // Pool has 1_000_000 collateral and 1_000_000 LP supply.
+        // Depositing 500_000 should mint 500_000 shares (50%).
+        let shares = AMM::calc_lp_shares_to_mint(500_000, 1_000_000, 1_000_000);
+        assert_eq!(shares, 500_000);
+    }
+
+    #[test]
+    fn test_calc_collateral_from_lp_proportional() {
+        // Holding 500_000 of 1_000_000 LP supply against 2_000_000 collateral
+        // should return 1_000_000 (50%).
+        let collateral = AMM::calc_collateral_from_lp(500_000, 2_000_000, 1_000_000);
+        assert_eq!(collateral, 1_000_000);
+    }
+
+    #[test]
+    fn test_mint_then_burn_unchanged_pool_returns_original_collateral() {
+        // Acceptance criterion: mint then immediately burn with unchanged pool
+        // returns the original collateral.
+        let collateral_in: u128 = 500_000;
+        let total_collateral: u128 = 1_000_000;
+        let total_lp_supply: u128 = 1_000_000;
+
+        // Step 1 — mint
+        let shares_minted =
+            AMM::calc_lp_shares_to_mint(collateral_in, total_collateral, total_lp_supply);
+
+        // Step 2 — burn against the *updated* supply (pool unchanged otherwise)
+        let new_total_collateral = total_collateral + collateral_in;
+        let new_total_lp_supply = total_lp_supply + shares_minted;
+
+        let collateral_out =
+            AMM::calc_collateral_from_lp(shares_minted, new_total_collateral, new_total_lp_supply);
+
+        assert_eq!(
+            collateral_out, collateral_in,
+            "burn should return exactly the deposited collateral when pool is unchanged"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "collateral_in must be greater than 0")]
+    fn test_calc_lp_shares_zero_collateral_panics() {
+        AMM::calc_lp_shares_to_mint(0, 1_000_000, 1_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "lp_tokens must be greater than 0")]
+    fn test_calc_collateral_zero_lp_tokens_panics() {
+        AMM::calc_collateral_from_lp(0, 1_000_000, 1_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "total_lp_supply must be greater than 0")]
+    fn test_calc_collateral_zero_supply_panics() {
+        AMM::calc_collateral_from_lp(100, 1_000_000, 0);
     }
 }

@@ -66,10 +66,12 @@ pub enum PredictionMarketError {
     InvalidMaxOutcomes = 5,
     /// dispute_bond must be > 0
     InvalidDisputeBond = 6,
+
     /// Caller is not the admin
     Unauthorized = 7,
     /// Contract has not been initialized yet
     NotInitialized = 8,
+
 }
 
 // ---------------------------------------------------------------------------
@@ -89,12 +91,14 @@ pub mod events {
         pub creator_fee_bps: u32,
     }
 
+
     #[contractevent]
     pub struct DisputeBondUpdated {
         pub admin: Address,
         pub old_bond: i128,
         pub new_bond: i128,
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +213,7 @@ impl PredictionMarketContract {
             .unwrap_or(false)
     }
 
+
     /// Admin-only: update the minimum dispute bond.
     ///
     /// - Requires the stored admin's signature.
@@ -256,6 +261,7 @@ impl PredictionMarketContract {
 
         Ok(())
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -602,6 +608,7 @@ mod tests {
     }
 
 
+
     // =========================================================================
     // update_dispute_bond tests (Issue #255)
     // =========================================================================
@@ -730,4 +737,5 @@ mod tests {
         let result = client.try_update_dispute_bond(&admin, &500i128);
         assert_eq!(result, Err(Ok(PredictionMarketError::NotInitialized)));
     }
+
 }
