@@ -82,6 +82,9 @@ fn setup_test_market(
         &resolution_time,
     );
 
+    // Transition from Initializing → Open so commit/reveal tests work.
+    client.set_open(&creator);
+
     (
         client,
         market_id,
@@ -140,7 +143,7 @@ fn test_market_initialize() {
     let (client, _market_id, _creator, _admin, _usdc_address, _market_contract) =
         setup_test_market(&env);
 
-    // Verify market state is OPEN (0)
+    // Verify market state is OPEN (0) — setup_test_market calls set_open after initialize
     let state = client.get_market_state_value();
     assert_eq!(state, Some(0));
 
@@ -951,7 +954,8 @@ fn test_cancel_market_happy_path() {
         &resolution_time,
     );
     
-    assert_eq!(client.get_market_state_value().unwrap(), 0);
+    // Market starts in Initializing (5); cancel is allowed from any non-resolved state.
+    assert_eq!(client.get_market_state_value().unwrap(), 5);
     client.cancel_market(&admin, &market_id);
     assert_eq!(client.get_market_state_value().unwrap(), 4);
 }
@@ -1017,6 +1021,9 @@ fn test_refund_position_happy_path() {
 
     client.initialize(&market_id, &creator, &factory_contract, &usdc_address, &oracle, &closing_time, &resolution_time);
 
+    // Transition to Open so commit_prediction is allowed.
+    client.set_open(&creator);
+
     let user = Address::generate(&env);
     let amount = 1000i128;
     token_client.mint(&user, &amount);
@@ -1056,6 +1063,9 @@ fn test_refund_position_already_refunded() {
     let resolution_time = closing_time + 3600;
 
     client.initialize(&market_id, &creator, &factory_contract, &usdc_address, &oracle, &closing_time, &resolution_time);
+
+    // Transition to Open so commit_prediction is allowed.
+    client.set_open(&creator);
 
     let user = Address::generate(&env);
     let amount = 1000i128;
