@@ -273,6 +273,19 @@ impl PredictionMarketContract {
             .get(&DataKey::LpPosition(provider, market_id))
             .ok_or(PredictionMarketError::LpPositionNotFound)
     }
+
+    /// Returns all outcome positions held by `holder` in `market_id`.
+    /// Returns an empty `Vec` if none exist.
+    pub fn get_user_market_positions(
+        env: Env,
+        holder: Address,
+        market_id: u64,
+    ) -> Vec<UserPosition> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserMarketPositions(holder, market_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
 }
 
 // ---------------------------------------------------------------------------
