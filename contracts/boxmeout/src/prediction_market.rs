@@ -340,6 +340,29 @@ impl PredictionMarketContract {
 
         Ok((complement_product.saturating_mul(10_000) / total) as u32)
     }
+        env: Env,
+        holder: Address,
+        market_id: u64,
+        outcome_id: u32,
+    ) -> Result<UserPosition, PredictionMarketError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserPosition(holder, market_id, outcome_id))
+            .ok_or(PredictionMarketError::PositionNotFound)
+    }
+
+    /// Returns all outcome positions held by `holder` in `market_id`.
+    /// Returns an empty `Vec` if none exist.
+    pub fn get_user_market_positions(
+        env: Env,
+        holder: Address,
+        market_id: u64,
+    ) -> Vec<UserPosition> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserMarketPositions(holder, market_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
 }
 
 // ---------------------------------------------------------------------------
