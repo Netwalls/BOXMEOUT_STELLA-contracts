@@ -17,6 +17,25 @@ pub struct UserPosition {
     pub redeemed: bool,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LpPosition {
+    pub market_id: u64,
+    pub provider: Address,
+    pub lp_shares: i128,
+    pub collateral_contributed: i128,
+    pub fees_claimed: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AmmPool {
+    pub market_id: u64,
+    pub reserves: Vec<i128>,
+    pub invariant_k: i128,
+    pub total_collateral: i128,
+}
+
 // ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
@@ -51,6 +70,8 @@ pub enum DataKey {
     OracleReport(BytesN<32>),
     UserPosition(Address, u64, u32), // (holder, market_id, outcome_id)
     UserMarketPositions(Address, u64), // (holder, market_id)
+    LpPosition(Address, u64),          // (provider, market_id)
+    AmmPool(u64),                      // market_id
 }
 
 // Market state constants
@@ -174,6 +195,10 @@ pub struct TradeReceipt {
 
     /// Position not found for the given key
     PositionNotFound = 7,
+    /// LP position not found for the given key
+    LpPositionNotFound = 8,
+    /// AMM pool not initialized for the given market
+    PoolNotInitialized = 9,
 }
 
 // ---------------------------------------------------------------------------
@@ -948,6 +973,97 @@ impl PredictionMarketContract {
         env.storage()
             .persistent()
             .get(&DataKey::OracleReport(market_id))
+    /// Returns all outcome positions held by `holder` in `market_id`.
+    /// Returns an empty `Vec` if none exist.
+    pub fn get_user_market_positions(
+        env: Env,
+        holder: Address,
+        market_id: u64,
+    ) -> Vec<UserPosition> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserMarketPositions(holder, market_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Returns the LP position for `(provider, market_id)`.
+    /// Errors with `LpPositionNotFound` if absent.
+    pub fn get_lp_position(
+        env: Env,
+        provider: Address,
+        market_id: u64,
+    ) -> Result<LpPosition, PredictionMarketError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LpPosition(provider, market_id))
+            .ok_or(PredictionMarketError::LpPositionNotFound)
+    }
+
+    /// Returns the AMM pool state for `market_id`.
+    /// Errors with `PoolNotInitialized` if absent.
+    pub fn get_amm_pool(
+        env: Env,
+        market_id: u64,
+    ) -> Result<AmmPool, PredictionMarketError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AmmPool(market_id))
+            .ok_or(PredictionMarketError::PoolNotInitialized)
+    }
+
+    /// Returns the CPMM implied probability for `outcome_id` in basis points (0–10 000).
+    ///
+    /// price_j = (product of all reserves except j) / (sum of such products) * 10_000
+    ///
+    /// Errors with `PoolNotInitialized` if the pool is absent.
+    pub fn get_outcome_price(
+        env: Env,
+        market_id: u64,
+        outcome_id: u32,
+    ) -> Result<u32, PredictionMarketError> {
+        let pool: AmmPool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AmmPool(market_id))
+            .ok_or(PredictionMarketError::PoolNotInitialized)?;
+
+        let reserves = &pool.reserves;
+        let n = reserves.len() as u32;
+        let idx = outcome_id as u32;
+
+        // product of all reserves except outcome_id
+        let complement_product: i128 = (0..n)
+            .filter(|&i| i != idx)
+            .map(|i| reserves.get(i).unwrap_or(1))
+            .fold(1i128, |acc, r| acc.saturating_mul(r));
+
+        // sum of complement products for every outcome
+        let total: i128 = (0..n)
+            .map(|j| {
+                (0..n)
+                    .filter(|&i| i != j)
+                    .map(|i| reserves.get(i).unwrap_or(1))
+                    .fold(1i128, |acc, r| acc.saturating_mul(r))
+            })
+            .fold(0i128, |acc, p| acc.saturating_add(p));
+
+        if total == 0 {
+            return Ok(0);
+        }
+
+        Ok((complement_product.saturating_mul(10_000) / total) as u32)
+    }
+        env: Env,
+        holder: Address,
+        market_id: u64,
+        outcome_id: u32,
+    ) -> Result<UserPosition, PredictionMarketError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserPosition(holder, market_id, outcome_id))
+            .ok_or(PredictionMarketError::PositionNotFound)
+    }
+
     /// Returns all outcome positions held by `holder` in `market_id`.
     /// Returns an empty `Vec` if none exist.
     pub fn get_user_market_positions(
