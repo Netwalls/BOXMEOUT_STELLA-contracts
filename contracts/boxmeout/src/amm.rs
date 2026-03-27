@@ -2,8 +2,7 @@
 // Enables trading YES/NO outcome shares with dynamic odds pricing (Polymarket model)
 
 use soroban_sdk::{
-    contract, contractevent, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal,
-    Symbol,
+    contract, contractevent, contractimpl, contracttype, token, Address, BytesN, Env, Symbol,
 };
 
 #[contractevent]
@@ -59,7 +58,6 @@ const SLIPPAGE_PROTECTION_KEY: &str = "slippage_protection";
 const TRADING_FEE_KEY: &str = "trading_fee";
 const PRICING_MODEL_KEY: &str = "pricing_model";
 const PAUSED_KEY: &str = "paused";
-const MIN_LIQUIDITY_KEY: &str = "min_liquidity";
 
 // Pool storage keys
 const POOL_YES_RESERVE_KEY: &str = "pool_yes_reserve";
@@ -73,7 +71,6 @@ const POOL_MARKET_STATE_KEY: &str = "pool_mkt_state";
 const LP_POSITION_KEY: &str = "lp_position";
 const LP_FEE_DEBT_KEY: &str = "lp_fee_debt";
 const POOL_TOTAL_FEES_KEY: &str = "pool_total_fees";
-const POOL_AMM_POOL_KEY: &str = "pool_amm_pool";
 
 /// Market state constants (mirrors market.rs STATE_* values)
 const MARKET_STATE_OPEN: u32 = 0;
@@ -636,216 +633,6 @@ impl AMM {
         }
 
         (yes_odds, no_odds)
-    }
-
-    /// Pure calculation: initial reserve per outcome when seeding a binary market.
-    ///
-    /// For a YES/NO CPMM pool the collateral is split equally across both
-    /// outcome reserves so that each outcome starts at an implied probability
-    /// of exactly 1/n (50% for n=2).
-    ///
-    /// Returns `collateral / num_outcomes`, panicking if `num_outcomes == 0`
-    /// or if the division would leave a remainder that makes the split uneven
-    /// (callers should ensure `collateral` is divisible by `num_outcomes`).
-    pub fn calc_initial_reserves(_env: Env, collateral: u128, num_outcomes: u32) -> u128 {
-        if num_outcomes == 0 {
-            panic!("num_outcomes must be positive");
-        }
-        let n = num_outcomes as u128;
-        collateral
-            .checked_div(n)
-            .expect("reserve calculation overflow")
-    }
-
-    /// Pure calculation: LP shares minted to the initial seed provider.
-    ///
-    /// At seed time there are no existing shares, so the provider receives
-    /// shares equal to the total collateral deposited (1:1 bootstrap).
-    pub fn calc_initial_lp_shares(_env: Env, collateral: u128) -> u128 {
-        if collateral == 0 {
-            panic!("collateral must be positive");
-        }
-        collateral
-    }
-
-    /// Seed a freshly-initialised market pool with collateral.
-    ///
-    /// This is the *first* liquidity operation on a market.  It sets equal
-    /// reserves for all outcomes (giving each outcome an implied price of
-    /// 1/n), computes the CPMM invariant k, mints LP shares to the provider,
-    /// and transitions the market from `Initializing` → `Open`.
-    ///
-    /// # Acceptance criteria
-    /// - Only callable by the market creator (verified via `market_contract`).
-    /// - Market must be in `Initializing` state.
-    /// - `collateral >= Config.min_liquidity`.
-    /// - Calls `calc_initial_reserves` and `calc_initial_lp_shares`.
-    /// - Initialises `AmmPool` with computed reserves and invariant k.
-    /// - Mints LP shares to the provider; creates `LpPosition`.
-    /// - Sets `market.status = Open` via cross-contract call.
-    /// - Emits `MarketSeeded`.
-    /// - Returns LP shares minted.
-    ///
-    /// # Parameters
-    /// - `provider`         — must be the market creator; pays the collateral.
-    /// - `market_id`        — identifies the pool to seed.
-    /// - `market_contract`  — address of the `PredictionMarket` contract for
-    ///                        this market (used to verify creator and open it).
-    /// - `collateral`       — USDC amount to deposit.
-    pub fn seed_pool(
-        env: Env,
-        provider: Address,
-        market_id: BytesN<32>,
-        market_contract: Address,
-        collateral: u128,
-    ) -> u128 {
-        // 1. Provider authentication
-        provider.require_auth();
-
-        // 2. Verify provider is the market creator via cross-contract call
-        let creator: Address = env.invoke_contract(
-            &market_contract,
-            &Symbol::new(&env, "get_creator"),
-            soroban_sdk::vec![&env],
-        );
-        if provider != creator {
-            panic!("only the market creator can seed the pool");
-        }
-
-        // 3. Collateral must meet the configured minimum
-        let min_liquidity: u128 = env
-            .storage()
-            .persistent()
-            .get(&Symbol::new(&env, MIN_LIQUIDITY_KEY))
-            .unwrap_or(0);
-        if collateral < min_liquidity {
-            panic!("collateral below minimum liquidity");
-        }
-
-        // 4. Pool must not already exist (seed is a one-shot operation)
-        let pool_exists_key = (Symbol::new(&env, POOL_EXISTS_KEY), market_id.clone());
-        if env.storage().persistent().has(&pool_exists_key) {
-            panic!("pool already seeded");
-        }
-
-        // 5. Binary market: 2 outcomes (YES = 1, NO = 0)
-        let num_outcomes: u32 = 2;
-
-        // 6. Compute equal reserves per outcome — gives each outcome price = 1/n
-        let reserve_per_outcome =
-            Self::calc_initial_reserves(env.clone(), collateral, num_outcomes);
-        if reserve_per_outcome == 0 {
-            panic!("collateral too small to split across outcomes");
-        }
-
-        // 7. Compute LP shares for the seed provider (1:1 with collateral)
-        let lp_shares = Self::calc_initial_lp_shares(env.clone(), collateral);
-
-        // 8. Compute CPMM invariant k = yes_reserve * no_reserve
-        let invariant_k = reserve_per_outcome
-            .checked_mul(reserve_per_outcome)
-            .expect("invariant_k overflow");
-
-        // 9. Persist pool reserves
-        let yes_reserve_key = (Symbol::new(&env, POOL_YES_RESERVE_KEY), market_id.clone());
-        let no_reserve_key = (Symbol::new(&env, POOL_NO_RESERVE_KEY), market_id.clone());
-        let k_key = (Symbol::new(&env, POOL_K_KEY), market_id.clone());
-        let lp_supply_key = (Symbol::new(&env, POOL_LP_SUPPLY_KEY), market_id.clone());
-
-        env.storage()
-            .persistent()
-            .set(&yes_reserve_key, &reserve_per_outcome);
-        env.storage()
-            .persistent()
-            .set(&no_reserve_key, &reserve_per_outcome);
-        env.storage().persistent().set(&k_key, &invariant_k);
-        env.storage().persistent().set(&pool_exists_key, &true);
-
-        // 10. Persist AmmPool snapshot
-        let amm_pool = AmmPool {
-            reserve_per_outcome,
-            num_outcomes,
-            invariant_k,
-            lp_supply: lp_shares,
-        };
-        let amm_pool_key = (Symbol::new(&env, POOL_AMM_POOL_KEY), market_id.clone());
-        env.storage().persistent().set(&amm_pool_key, &amm_pool);
-
-        // 11. Mint LP shares — update global supply
-        env.storage().persistent().set(&lp_supply_key, &lp_shares);
-
-        // 12. Create LpPosition for the seed provider
-        let lp_position_key = (
-            Symbol::new(&env, LP_POSITION_KEY),
-            market_id.clone(),
-            provider.clone(),
-        );
-        let position = LpPosition {
-            lp_shares,
-            last_updated: env.ledger().timestamp(),
-        };
-        env.storage().persistent().set(&lp_position_key, &position);
-
-        // 13. Legacy LP balance key (kept for remove_liquidity / get_pool_state compat)
-        let lp_balance_key = (
-            Symbol::new(&env, POOL_LP_TOKENS_KEY),
-            market_id.clone(),
-            provider.clone(),
-        );
-        env.storage().persistent().set(&lp_balance_key, &lp_shares);
-
-        // 14. Fee debt snapshot — zero at seed time (no prior fees)
-        let lp_fee_debt_key = (
-            Symbol::new(&env, LP_FEE_DEBT_KEY),
-            market_id.clone(),
-            provider.clone(),
-        );
-        env.storage().persistent().set(&lp_fee_debt_key, &0u128);
-
-        // 15. Mark market state as Open in the AMM's own tracking
-        let market_state_key = (Symbol::new(&env, POOL_MARKET_STATE_KEY), market_id.clone());
-        env.storage()
-            .persistent()
-            .set(&market_state_key, &MARKET_STATE_OPEN);
-
-        // 16. Pull collateral from provider into this contract
-        let usdc_token: Address = env
-            .storage()
-            .persistent()
-            .get(&Symbol::new(&env, USDC_KEY))
-            .expect("usdc token not set");
-        let token_client = token::Client::new(&env, &usdc_token);
-        token_client.transfer(
-            &provider,
-            env.current_contract_address(),
-            &(collateral as i128),
-        );
-
-        // 17. Transition market contract state: Initializing → Open
-        env.invoke_contract::<()>(
-            &market_contract,
-            &Symbol::new(&env, "set_open"),
-            (provider.clone(),).into_val(&env),
-        );
-
-        // 18. Emit MarketSeeded event
-        MarketSeeded {
-            market_id,
-            provider,
-            collateral,
-            lp_shares,
-            reserve_per_outcome,
-            k: invariant_k,
-        }
-        .publish(&env);
-
-        lp_shares
-    }
-
-    /// Read the AmmPool snapshot for a seeded market.
-    pub fn get_amm_pool(env: Env, market_id: BytesN<32>) -> Option<AmmPool> {
-        let key = (Symbol::new(&env, POOL_AMM_POOL_KEY), market_id);
-        env.storage().persistent().get(&key)
     }
 
     /// Pure calculation: LP shares to mint for a given collateral deposit.
