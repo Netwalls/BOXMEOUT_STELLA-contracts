@@ -2,8 +2,18 @@
 // One-time bootstrap initialization with full config validation
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, Address, Env,
+    contract, contracterror, contractevent, contractimpl, contracttype, Address, Env, Vec,
 };
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UserPosition {
+    pub market_id: u64,
+    pub outcome_id: u32,
+    pub holder: Address,
+    pub shares: i128,
+    pub redeemed: bool,
+}
 
 // ---------------------------------------------------------------------------
 // Storage keys
@@ -15,6 +25,8 @@ pub enum DataKey {
     Config,
     NextMarketId,
     EmergencyPause,
+    UserPosition(Address, u64, u32), // (holder, market_id, outcome_id)
+    UserMarketPositions(Address, u64), // (holder, market_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -66,12 +78,8 @@ pub enum PredictionMarketError {
     InvalidMaxOutcomes = 5,
     /// dispute_bond must be > 0
     InvalidDisputeBond = 6,
-
-    /// Caller is not the admin
-    Unauthorized = 7,
-    /// Contract has not been initialized yet
-    NotInitialized = 8,
-
+    /// Position not found for the given key
+    PositionNotFound = 7,
 }
 
 // ---------------------------------------------------------------------------
@@ -213,55 +221,32 @@ impl PredictionMarketContract {
             .unwrap_or(false)
     }
 
-
-    /// Admin-only: update the minimum dispute bond.
-    ///
-    /// - Requires the stored admin's signature.
-    /// - Rejects `new_bond <= 0` with `InvalidDisputeBond`.
-    /// - Loads Config, replaces only `dispute_bond`, and persists atomically.
-    /// - Emits `events::DisputeBondUpdated` on success.
-    /// - No state is modified on any failure path.
-    pub fn update_dispute_bond(
+    /// Returns the position for `(holder, market_id, outcome_id)`.
+    /// Errors with `PositionNotFound` if no position exists.
+    pub fn get_position(
         env: Env,
-        admin: Address,
-        new_bond: i128,
-    ) -> Result<(), PredictionMarketError> {
-        // ── Load config (errors if not yet initialized) ──────────────────────
-        let mut config: Config = env
-            .storage()
+        holder: Address,
+        market_id: u64,
+        outcome_id: u32,
+    ) -> Result<UserPosition, PredictionMarketError> {
+        env.storage()
             .persistent()
-            .get(&DataKey::Config)
-            .ok_or(PredictionMarketError::NotInitialized)?;
-
-        // ── Strict admin authorization ───────────────────────────────────────
-        // Verify the caller matches the stored admin before requiring auth,
-        // so an attacker cannot force an auth check on an arbitrary address.
-        if admin != config.admin {
-            return Err(PredictionMarketError::Unauthorized);
-        }
-        admin.require_auth();
-
-        // ── Validate new bond ────────────────────────────────────────────────
-        if new_bond <= 0 {
-            return Err(PredictionMarketError::InvalidDisputeBond);
-        }
-
-        // ── Atomic update (single field, no partial writes) ──────────────────
-        let old_bond = config.dispute_bond;
-        config.dispute_bond = new_bond;
-        env.storage().persistent().set(&DataKey::Config, &config);
-
-        // ── Emit event ───────────────────────────────────────────────────────
-        events::DisputeBondUpdated {
-            admin,
-            old_bond,
-            new_bond,
-        }
-        .publish(&env);
-
-        Ok(())
+            .get(&DataKey::UserPosition(holder, market_id, outcome_id))
+            .ok_or(PredictionMarketError::PositionNotFound)
     }
 
+    /// Returns all outcome positions held by `holder` in `market_id`.
+    /// Returns an empty `Vec` if none exist.
+    pub fn get_user_market_positions(
+        env: Env,
+        holder: Address,
+        market_id: u64,
+    ) -> Vec<UserPosition> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserMarketPositions(holder, market_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
 }
 
 // ---------------------------------------------------------------------------
