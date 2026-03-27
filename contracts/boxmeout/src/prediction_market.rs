@@ -1076,6 +1076,44 @@ impl PredictionMarketContract {
             .get(&DataKey::UserMarketPositions(holder, market_id))
             .unwrap_or_else(|| Vec::new(&env))
     }
+
+    /// Returns the LP position for `(provider, market_id)`.
+    /// Errors with `LpPositionNotFound` if absent.
+    pub fn get_lp_position(
+        env: Env,
+        provider: Address,
+        market_id: u64,
+    ) -> Result<LpPosition, PredictionMarketError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LpPosition(provider, market_id))
+            .ok_or(PredictionMarketError::LpPositionNotFound)
+    }
+
+    /// Returns the AMM pool state for `market_id`.
+    /// Errors with `PoolNotInitialized` if absent.
+    pub fn get_amm_pool(
+        env: Env,
+        market_id: u64,
+    ) -> Result<AmmPool, PredictionMarketError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AmmPool(market_id))
+            .ok_or(PredictionMarketError::PoolNotInitialized)
+    }
+
+    /// Returns all outcome positions held by `holder` in `market_id`.
+    /// Returns an empty `Vec` if none exist.
+    pub fn get_user_market_positions(
+        env: Env,
+        holder: Address,
+        market_id: u64,
+    ) -> Vec<UserPosition> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserMarketPositions(holder, market_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
 }
 
 // ---------------------------------------------------------------------------
