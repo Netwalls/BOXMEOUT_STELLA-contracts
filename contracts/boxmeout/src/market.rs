@@ -93,11 +93,19 @@ const VOLUME_24H_KEY: &str = "volume_24h";
 const LAST_TRADE_AT_KEY: &str = "last_trade_at";
 
 /// Market states
+const STATE_INITIALIZING: u32 = 5; // Awaiting seed_pool before trading opens
 const STATE_OPEN: u32 = 0;
 const STATE_CLOSED: u32 = 1;
 const STATE_RESOLVED: u32 = 2;
 const STATE_DISPUTED: u32 = 3;
 const STATE_CANCELLED: u32 = 4;
+
+/// Public re-exports so the AMM contract can read/write market state
+/// without duplicating magic numbers.
+#[allow(dead_code)]
+pub const MARKET_STATE_INITIALIZING: u32 = STATE_INITIALIZING;
+#[allow(dead_code)]
+pub const MARKET_STATE_OPEN: u32 = STATE_OPEN;
 
 /// Error codes following Soroban best practices
 #[contracterror]
@@ -139,6 +147,15 @@ pub struct Commitment {
     pub user: Address,
     pub commit_hash: BytesN<32>,
     pub amount: i128,
+    pub timestamp: u64,
+}
+
+/// Oracle report record
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleReport {
+    pub oracle: Address,
+    pub outcome: u32,
     pub timestamp: u64,
 }
 
@@ -290,7 +307,7 @@ impl PredictionMarket {
 
         env.storage()
             .persistent()
-            .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_OPEN);
+            .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_INITIALIZING);
 
         // Initialize prediction pools
         env.storage()
@@ -499,6 +516,39 @@ impl PredictionMarket {
         env.storage()
             .persistent()
             .get(&Symbol::new(&env, MARKET_STATE_KEY))
+    }
+
+    /// Return the market creator address.
+    pub fn get_creator(env: Env) -> Address {
+        env.storage()
+            .persistent()
+            .get(&Symbol::new(&env, CREATOR_KEY))
+            .expect("market not initialized")
+    }
+
+    /// Transition market from Initializing → Open.
+    /// Only callable by the stored creator (enforced by the AMM seed_pool path).
+    pub fn set_open(env: Env, caller: Address) {
+        caller.require_auth();
+        let creator: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, CREATOR_KEY))
+            .expect("market not initialized");
+        if caller != creator {
+            panic!("only the market creator can open the market");
+        }
+        let state: u32 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, MARKET_STATE_KEY))
+            .expect("market not initialized");
+        if state != STATE_INITIALIZING {
+            panic!("market is not in Initializing state");
+        }
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, MARKET_STATE_KEY), &STATE_OPEN);
     }
 
     /// Phase 2: User reveals their committed prediction
@@ -1318,6 +1368,20 @@ impl PredictionMarket {
         })
     }
 
+    /// Returns the oracle report for this market, or None if not yet reported.
+    /// Read-only: no state mutation.
+    pub fn get_oracle_report(env: Env, market_id: BytesN<32>) -> Option<OracleReport> {
+        let key = (Symbol::new(&env, "oracle_report"), market_id);
+        env.storage().persistent().get(&key)
+    }
+
+    /// Returns the dispute record for this market, or None if no dispute exists.
+    /// Read-only: no state mutation.
+    pub fn get_dispute(env: Env, market_id: BytesN<32>) -> Option<DisputeRecord> {
+        let key = (Symbol::new(&env, "dispute"), market_id);
+        env.storage().persistent().get(&key)
+    }
+
     /// Get market leaderboard (top predictors by winnings)
     ///
     /// This function returns the top N winners from a resolved market,
@@ -1524,23 +1588,30 @@ impl PredictionMarket {
         (yes_reserve, no_reserve, total_liquidity, yes_odds, no_odds)
     }
 
-    /// Emergency function: Market creator can cancel unresolved market
+    /// Emergency function: Protocol Admin can cancel unresolved market
     ///
-    /// - Require creator authentication
+    /// - Require admin authentication
+    /// - Validate caller is the protocol admin via Factory
     /// - Validate market state is OPEN or CLOSED (not resolved)
     /// - Set market state to CANCELLED; participants claim refunds via claim_refund
     /// - Emit MarketCancelled(market_id, creator, timestamp)
     pub fn cancel_market(env: Env, creator: Address, market_id: BytesN<32>) {
         creator.require_auth();
 
-        let stored_creator: Address = env
+        let factory: Address = env
             .storage()
             .persistent()
-            .get(&Symbol::new(&env, CREATOR_KEY))
+            .get(&Symbol::new(&env, FACTORY_KEY))
             .expect("Market not initialized");
 
-        if creator != stored_creator {
-            panic!("Unauthorized: only creator can cancel");
+        // Verify the admin is indeed the protocol admin from the factory
+        let real_admin: Address = env.invoke_contract(
+            &factory,
+            &Symbol::new(&env, "get_admin"),
+            soroban_sdk::vec![&env],
+        );
+        if admin != real_admin {
+            panic!("Unauthorized: only admin can cancel");
         }
 
         let state: u32 = env
@@ -1563,16 +1634,8 @@ impl PredictionMarket {
 
         let timestamp = env.ledger().timestamp();
 
-        #[contractevent]
-        pub struct MarketCancelledEvent {
-            pub market_id: BytesN<32>,
-            pub creator: Address,
-            pub timestamp: u64,
-        }
-
         MarketCancelledEvent {
             market_id,
-            creator,
             timestamp,
         }
         .publish(&env);
@@ -1705,6 +1768,17 @@ impl PredictionMarket {
     pub fn test_get_prediction(env: Env, user: Address) -> Option<UserPrediction> {
         let key = (Symbol::new(&env, PREDICTION_PREFIX), user);
         env.storage().persistent().get(&key)
+    }
+
+    /// Test helper: Store an oracle report directly (for testing get_oracle_report)
+    pub fn test_set_oracle_report(env: Env, market_id: BytesN<32>, oracle: Address, outcome: u32) {
+        let report = OracleReport {
+            oracle,
+            outcome,
+            timestamp: env.ledger().timestamp(),
+        };
+        let key = (Symbol::new(&env, "oracle_report"), market_id);
+        env.storage().persistent().set(&key, &report);
     }
 
     /// Test helper: Get winning outcome
