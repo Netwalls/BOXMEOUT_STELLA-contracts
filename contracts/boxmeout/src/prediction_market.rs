@@ -123,6 +123,15 @@ pub mod events {
         pub protocol_fee_bps: u32,
         pub creator_fee_bps: u32,
     }
+
+
+    #[contractevent]
+    pub struct DisputeBondUpdated {
+        pub admin: Address,
+        pub old_bond: i128,
+        pub new_bond: i128,
+    }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -632,4 +641,136 @@ mod tests {
         let client = PredictionMarketContractClient::new(&env, &cid);
         assert!(client.get_config().is_none());
     }
+
+
+
+    // =========================================================================
+    // update_dispute_bond tests (Issue #255)
+    // =========================================================================
+
+    // -- happy path -----------------------------------------------------------
+
+    #[test]
+    fn test_update_dispute_bond_success() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(client.try_update_dispute_bond(&admin, &1_000i128).is_ok());
+    }
+
+    #[test]
+    fn test_update_dispute_bond_persisted() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        client.try_update_dispute_bond(&admin, &9_999i128).unwrap();
+        assert_eq!(client.get_config().unwrap().dispute_bond, 9_999);
+    }
+
+    #[test]
+    fn test_update_dispute_bond_preserves_other_fields() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        client.try_update_dispute_bond(&admin, &2_000i128).unwrap();
+        let config = client.get_config().unwrap();
+        assert_eq!(config.admin, admin);
+        assert_eq!(config.treasury, treasury);
+        assert_eq!(config.oracle, oracle);
+        assert_eq!(config.token, token);
+        assert_eq!(config.protocol_fee_bps, 200);
+        assert_eq!(config.creator_fee_bps, 100);
+        assert_eq!(config.min_liquidity, 1_000);
+        assert_eq!(config.min_trade, 100);
+        assert_eq!(config.max_outcomes, 2);
+        assert_eq!(config.dispute_bond, 2_000);
+    }
+
+    #[test]
+    fn test_update_dispute_bond_emits_event() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let before_count = env.events().all().len();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        client.try_update_dispute_bond(&admin, &750i128).unwrap();
+        assert!(env.events().all().len() > before_count);
+    }
+
+    #[test]
+    fn test_update_dispute_bond_multiple_times() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        client.try_update_dispute_bond(&admin, &100i128).unwrap();
+        client.try_update_dispute_bond(&admin, &200i128).unwrap();
+        client.try_update_dispute_bond(&admin, &300i128).unwrap();
+        assert_eq!(client.get_config().unwrap().dispute_bond, 300);
+    }
+
+    // -- authorization --------------------------------------------------------
+
+    #[test]
+    fn test_update_dispute_bond_non_admin_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let attacker = Address::generate(&env);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_update_dispute_bond(&attacker, &1_000i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_update_dispute_bond_unauthorized_does_not_mutate_state() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let original_bond = client.get_config().unwrap().dispute_bond;
+        let attacker = Address::generate(&env);
+        let _ = client.try_update_dispute_bond(&attacker, &99_999i128);
+        assert_eq!(client.get_config().unwrap().dispute_bond, original_bond);
+    }
+
+    // -- validation -----------------------------------------------------------
+
+    #[test]
+    fn test_update_dispute_bond_zero_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_update_dispute_bond(&admin, &0i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::InvalidDisputeBond)));
+    }
+
+    #[test]
+    fn test_update_dispute_bond_negative_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_update_dispute_bond(&admin, &-1i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::InvalidDisputeBond)));
+    }
+
+    #[test]
+    fn test_update_dispute_bond_invalid_does_not_mutate_state() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let original_bond = client.get_config().unwrap().dispute_bond;
+        let _ = client.try_update_dispute_bond(&admin, &0i128);
+        assert_eq!(client.get_config().unwrap().dispute_bond, original_bond);
+    }
+
+    // -- not initialized ------------------------------------------------------
+
+    #[test]
+    fn test_update_dispute_bond_before_init_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let cid = env.register(PredictionMarketContract, ());
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_update_dispute_bond(&admin, &500i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::NotInitialized)));
+    }
+
 }
