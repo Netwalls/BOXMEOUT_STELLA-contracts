@@ -1,7 +1,9 @@
 // contracts/amm.rs - Automated Market Maker for Outcome Shares
 // Enables trading YES/NO outcome shares with dynamic odds pricing (Polymarket model)
 
-use soroban_sdk::{contract, contractevent, contractimpl, token, Address, BytesN, Env, Symbol};
+use soroban_sdk::{
+    contract, contractevent, contractimpl, contracttype, token, Address, BytesN, Env, Symbol,
+};
 
 #[contractevent]
 pub struct AmmInitializedEvent {
@@ -55,6 +57,7 @@ const MAX_LIQUIDITY_CAP_KEY: &str = "max_liquidity_cap";
 const SLIPPAGE_PROTECTION_KEY: &str = "slippage_protection";
 const TRADING_FEE_KEY: &str = "trading_fee";
 const PRICING_MODEL_KEY: &str = "pricing_model";
+const PAUSED_KEY: &str = "paused";
 
 // Pool storage keys
 const POOL_YES_RESERVE_KEY: &str = "pool_yes_reserve";
@@ -64,14 +67,22 @@ const POOL_K_KEY: &str = "pool_k";
 const POOL_LP_SUPPLY_KEY: &str = "pool_lp_supply";
 const POOL_LP_TOKENS_KEY: &str = "pool_lp_tokens";
 const USER_SHARES_KEY: &str = "user_shares";
+const POOL_MARKET_STATE_KEY: &str = "pool_mkt_state";
+const LP_POSITION_KEY: &str = "lp_position";
+const LP_FEE_DEBT_KEY: &str = "lp_fee_debt";
+const POOL_TOTAL_FEES_KEY: &str = "pool_total_fees";
 
-// Pool data structure
-#[derive(Clone)]
-pub struct Pool {
-    pub yes_reserve: u128,
-    pub no_reserve: u128,
-    pub total_liquidity: u128,
-    pub created_at: u64,
+/// Market state constants (mirrors market.rs STATE_* values)
+const MARKET_STATE_OPEN: u32 = 0;
+
+/// LP position record — tracks a provider's share of a specific pool.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LpPosition {
+    /// Total LP shares held by this provider in this pool.
+    pub lp_shares: u128,
+    /// Ledger timestamp of the last deposit or update.
+    pub last_updated: u64,
 }
 
 #[contractevent]
@@ -110,6 +121,7 @@ pub struct AMM;
 
 /// Soroban contract type for AMM
 pub type AMMContract = AMM;
+
 #[contractimpl]
 impl AMM {
     /// Initialize AMM with liquidity pools
@@ -213,6 +225,20 @@ impl AMM {
         let lp_tokens = initial_liquidity;
         env.storage().persistent().set(&lp_supply_key, &lp_tokens);
         env.storage().persistent().set(&lp_balance_key, &lp_tokens);
+
+        // Create initial LpPosition for the pool creator
+        let lp_position_key = (
+            Symbol::new(&env, LP_POSITION_KEY),
+            market_id.clone(),
+            creator.clone(),
+        );
+        let initial_position = LpPosition {
+            lp_shares: lp_tokens,
+            last_updated: env.ledger().timestamp(),
+        };
+        env.storage()
+            .persistent()
+            .set(&lp_position_key, &initial_position);
 
         // Transfer USDC from creator to contract
         let usdc_token: Address = env
@@ -575,34 +601,83 @@ impl AMM {
         (yes_odds, no_odds)
     }
 
-    /// Add USDC liquidity to an existing pool and mint LP tokens proportionally.
-    /// Returns minted LP token amount.
+    /// Pure calculation: LP shares to mint for a given collateral deposit.
+    ///
+    /// Exposed as a public entry point so callers can preview the mint amount
+    /// before submitting a transaction.
+    ///
+    /// - First LP (supply == 0): receives 1:1 shares for deposited collateral.
+    /// - Subsequent LPs: shares = collateral * current_supply / current_total_liquidity
+    pub fn calc_lp_shares_to_mint(
+        _env: Env,
+        current_lp_supply: u128,
+        current_total_liquidity: u128,
+        collateral: u128,
+    ) -> u128 {
+        calculate_lp_tokens_to_mint(current_lp_supply, current_total_liquidity, collateral)
+    }
+
+    /// Add USDC liquidity to an open market pool, receiving LP shares proportional
+    /// to the contribution.
+    ///
+    /// # Acceptance criteria
+    /// - Checks global pause; panics if protocol is paused.
+    /// - Requires `lp_provider` authentication.
+    /// - Pool must exist and the associated market must be in the Open state.
+    /// - `collateral` must be > 0.
+    /// - Calls `calc_lp_shares_to_mint` to determine shares to issue.
+    /// - Adds collateral proportionally across YES/NO reserves (preserving prices).
+    /// - Recomputes `invariant_k`.
+    /// - Creates or updates the provider's `LpPosition`; snapshots `LpFeeDebt`.
+    /// - Emits `LiquidityAdded` event.
+    ///
+    /// Returns the number of LP shares minted.
     pub fn add_liquidity(
         env: Env,
         lp_provider: Address,
         market_id: BytesN<32>,
-        usdc_amount: u128,
+        collateral: u128,
     ) -> u128 {
-        lp_provider.require_auth();
-
-        if usdc_amount == 0 {
-            panic!("usdc amount must be greater than 0");
+        // 1. Global pause guard
+        let paused: bool = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, PAUSED_KEY))
+            .unwrap_or(false);
+        if paused {
+            panic!("protocol is paused");
         }
 
+        // 2. Provider authentication
+        lp_provider.require_auth();
+
+        // 3. Collateral must be positive
+        if collateral == 0 {
+            panic!("collateral must be greater than 0");
+        }
+
+        // 4. Pool must exist
         let pool_exists_key = (Symbol::new(&env, POOL_EXISTS_KEY), market_id.clone());
         if !env.storage().persistent().has(&pool_exists_key) {
             panic!("pool does not exist");
         }
 
+        // 5. Market must be in Open state (STATE_OPEN = 0)
+        let market_state_key = (Symbol::new(&env, POOL_MARKET_STATE_KEY), market_id.clone());
+        let market_state: u32 = env
+            .storage()
+            .persistent()
+            .get(&market_state_key)
+            .unwrap_or(MARKET_STATE_OPEN);
+        if market_state != MARKET_STATE_OPEN {
+            panic!("market is not open");
+        }
+
+        // 6. Load current reserves
         let yes_reserve_key = (Symbol::new(&env, POOL_YES_RESERVE_KEY), market_id.clone());
         let no_reserve_key = (Symbol::new(&env, POOL_NO_RESERVE_KEY), market_id.clone());
         let k_key = (Symbol::new(&env, POOL_K_KEY), market_id.clone());
         let lp_supply_key = (Symbol::new(&env, POOL_LP_SUPPLY_KEY), market_id.clone());
-        let lp_balance_key = (
-            Symbol::new(&env, POOL_LP_TOKENS_KEY),
-            market_id.clone(),
-            lp_provider.clone(),
-        );
 
         let yes_reserve: u128 = env
             .storage()
@@ -619,48 +694,69 @@ impl AMM {
             .expect("total liquidity overflow");
         let current_lp_supply: u128 = env.storage().persistent().get(&lp_supply_key).unwrap_or(0);
 
-        let lp_tokens_to_mint =
-            calculate_lp_tokens_to_mint(current_lp_supply, current_total_liquidity, usdc_amount);
-        if lp_tokens_to_mint == 0 {
-            panic!("lp tokens to mint must be positive");
+        // 7. Calculate LP shares via the public pure function
+        let lp_shares_to_mint = Self::calc_lp_shares_to_mint(
+            env.clone(),
+            current_lp_supply,
+            current_total_liquidity,
+            collateral,
+        );
+        if lp_shares_to_mint == 0 {
+            panic!("lp shares to mint must be positive");
         }
 
-        // Add liquidity proportionally to preserve pool pricing.
-        let yes_add = if current_total_liquidity == 0 {
-            usdc_amount / 2
+        // 8. Snapshot accumulated fees per LP share before minting new shares.
+        //    fee_debt = current total_fees_accumulated / current_lp_supply
+        //    New LP tokens are minted *after* this snapshot so the new provider
+        //    does not retroactively claim fees earned before their deposit.
+        let total_fees_key = (Symbol::new(&env, POOL_TOTAL_FEES_KEY), market_id.clone());
+        let total_fees_accumulated: u128 = env
+            .storage()
+            .persistent()
+            .get(&total_fees_key)
+            .unwrap_or(0);
+        let fee_debt_snapshot: u128 = if current_lp_supply == 0 {
+            0
         } else {
-            usdc_amount
+            total_fees_accumulated
+                .checked_mul(lp_shares_to_mint)
+                .and_then(|v| v.checked_div(current_lp_supply))
+                .unwrap_or(0)
+        };
+
+        // 9. Distribute collateral proportionally across reserves to preserve prices.
+        //    yes_add / no_add = yes_reserve / no_reserve  =>  prices unchanged.
+        let yes_add = if current_total_liquidity == 0 {
+            collateral / 2
+        } else {
+            collateral
                 .checked_mul(yes_reserve)
                 .and_then(|v| v.checked_div(current_total_liquidity))
                 .expect("yes reserve add overflow")
         };
-        let no_add = usdc_amount
+        let no_add = collateral
             .checked_sub(yes_add)
             .expect("liquidity split underflow");
 
         if yes_add == 0 || no_add == 0 {
-            panic!("liquidity amount too small");
+            panic!("collateral amount too small to split across reserves");
         }
 
+        // 10. Compute new reserves and recompute invariant_k
         let new_yes_reserve = yes_reserve
             .checked_add(yes_add)
             .expect("yes reserve overflow");
-        let new_no_reserve = no_reserve.checked_add(no_add).expect("no reserve overflow");
+        let new_no_reserve = no_reserve
+            .checked_add(no_add)
+            .expect("no reserve overflow");
         let new_k = new_yes_reserve
             .checked_mul(new_no_reserve)
-            .expect("k overflow");
+            .expect("invariant_k overflow");
         let new_total_liquidity = current_total_liquidity
-            .checked_add(usdc_amount)
+            .checked_add(collateral)
             .expect("total liquidity overflow");
 
-        let new_lp_supply = current_lp_supply
-            .checked_add(lp_tokens_to_mint)
-            .expect("lp supply overflow");
-        let current_lp_balance: u128 = env.storage().persistent().get(&lp_balance_key).unwrap_or(0);
-        let new_lp_balance = current_lp_balance
-            .checked_add(lp_tokens_to_mint)
-            .expect("lp balance overflow");
-
+        // 11. Persist updated reserves and invariant_k
         env.storage()
             .persistent()
             .set(&yes_reserve_key, &new_yes_reserve);
@@ -668,13 +764,76 @@ impl AMM {
             .persistent()
             .set(&no_reserve_key, &new_no_reserve);
         env.storage().persistent().set(&k_key, &new_k);
+
+        // 12. Update global LP supply
+        let new_lp_supply = current_lp_supply
+            .checked_add(lp_shares_to_mint)
+            .expect("lp supply overflow");
         env.storage()
             .persistent()
             .set(&lp_supply_key, &new_lp_supply);
+
+        // 13. Create or update LpPosition for this provider
+        let lp_position_key = (
+            Symbol::new(&env, LP_POSITION_KEY),
+            market_id.clone(),
+            lp_provider.clone(),
+        );
+        let existing_shares: u128 = env
+            .storage()
+            .persistent()
+            .get::<_, LpPosition>(&lp_position_key)
+            .map(|p| p.lp_shares)
+            .unwrap_or(0);
+        let updated_position = LpPosition {
+            lp_shares: existing_shares
+                .checked_add(lp_shares_to_mint)
+                .expect("lp position overflow"),
+            last_updated: env.ledger().timestamp(),
+        };
         env.storage()
             .persistent()
-            .set(&lp_balance_key, &new_lp_balance);
+            .set(&lp_position_key, &updated_position);
 
+        // 14. Snapshot LpFeeDebt — records the cumulative fees already accounted
+        //     for this provider so future fee claims only pay out new fees.
+        let lp_fee_debt_key = (
+            Symbol::new(&env, LP_FEE_DEBT_KEY),
+            market_id.clone(),
+            lp_provider.clone(),
+        );
+        let existing_fee_debt: u128 = env
+            .storage()
+            .persistent()
+            .get(&lp_fee_debt_key)
+            .unwrap_or(0);
+        let new_fee_debt = existing_fee_debt
+            .checked_add(fee_debt_snapshot)
+            .expect("fee debt overflow");
+        env.storage()
+            .persistent()
+            .set(&lp_fee_debt_key, &new_fee_debt);
+
+        // Legacy per-user LP token balance key kept for backward compatibility
+        // with existing read paths (get_pool_state, remove_liquidity).
+        let lp_balance_key = (
+            Symbol::new(&env, POOL_LP_TOKENS_KEY),
+            market_id.clone(),
+            lp_provider.clone(),
+        );
+        let current_lp_balance: u128 = env
+            .storage()
+            .persistent()
+            .get(&lp_balance_key)
+            .unwrap_or(0);
+        env.storage().persistent().set(
+            &lp_balance_key,
+            &current_lp_balance
+                .checked_add(lp_shares_to_mint)
+                .expect("lp balance overflow"),
+        );
+
+        // 15. Pull collateral from provider into the contract
         let usdc_token: Address = env
             .storage()
             .persistent()
@@ -684,19 +843,69 @@ impl AMM {
         token_client.transfer(
             &lp_provider,
             env.current_contract_address(),
-            &(usdc_amount as i128),
+            &(collateral as i128),
         );
 
-        let event = LiquidityAdded {
-            provider: lp_provider.clone(),
-            usdc_amount,
-            lp_tokens_minted: lp_tokens_to_mint,
+        // 16. Emit LiquidityAdded event
+        LiquidityAdded {
+            provider: lp_provider,
+            usdc_amount: collateral,
+            lp_tokens_minted: lp_shares_to_mint,
             new_reserve: new_total_liquidity,
             k: new_k,
-        };
-        event.publish(&env);
+        }
+        .publish(&env);
 
-        lp_tokens_to_mint
+        lp_shares_to_mint
+    }
+
+    /// Admin: pause or unpause the protocol.
+    /// Only the stored admin may call this.
+    pub fn set_paused(env: Env, admin: Address, paused: bool) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, ADMIN_KEY))
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, PAUSED_KEY), &paused);
+    }
+
+    /// Admin: set the market state for a pool (used by the factory/market contract
+    /// to signal that a market has moved out of the Open state).
+    pub fn set_market_state(env: Env, caller: Address, market_id: BytesN<32>, state: u32) {
+        caller.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, ADMIN_KEY))
+            .expect("not initialized");
+        if caller != stored_admin {
+            panic!("unauthorized");
+        }
+        let market_state_key = (Symbol::new(&env, POOL_MARKET_STATE_KEY), market_id);
+        env.storage().persistent().set(&market_state_key, &state);
+    }
+
+    /// Read the LpPosition for a provider in a given pool.
+    pub fn get_lp_position(
+        env: Env,
+        market_id: BytesN<32>,
+        provider: Address,
+    ) -> Option<LpPosition> {
+        let key = (Symbol::new(&env, LP_POSITION_KEY), market_id, provider);
+        env.storage().persistent().get(&key)
+    }
+
+    /// Read the accumulated fee debt for a provider in a given pool.
+    pub fn get_lp_fee_debt(env: Env, market_id: BytesN<32>, provider: Address) -> u128 {
+        let key = (Symbol::new(&env, LP_FEE_DEBT_KEY), market_id, provider);
+        env.storage().persistent().get(&key).unwrap_or(0)
     }
 
     /// Remove liquidity from pool (redeem LP tokens)

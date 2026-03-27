@@ -1547,23 +1547,30 @@ impl PredictionMarket {
         (yes_reserve, no_reserve, total_liquidity, yes_odds, no_odds)
     }
 
-    /// Emergency function: Market creator can cancel unresolved market
+    /// Emergency function: Protocol Admin can cancel unresolved market
     ///
-    /// - Require creator authentication
+    /// - Require admin authentication
+    /// - Validate caller is the protocol admin via Factory
     /// - Validate market state is OPEN or CLOSED (not resolved)
     /// - Set market state to CANCELLED; participants claim refunds via claim_refund
     /// - Emit MarketCancelled(market_id, creator, timestamp)
     pub fn cancel_market(env: Env, creator: Address, market_id: BytesN<32>) {
         creator.require_auth();
 
-        let stored_creator: Address = env
+        let factory: Address = env
             .storage()
             .persistent()
-            .get(&Symbol::new(&env, CREATOR_KEY))
+            .get(&Symbol::new(&env, FACTORY_KEY))
             .expect("Market not initialized");
 
-        if creator != stored_creator {
-            panic!("Unauthorized: only creator can cancel");
+        // Verify the admin is indeed the protocol admin from the factory
+        let real_admin: Address = env.invoke_contract(
+            &factory,
+            &Symbol::new(&env, "get_admin"),
+            soroban_sdk::vec![&env],
+        );
+        if admin != real_admin {
+            panic!("Unauthorized: only admin can cancel");
         }
 
         let state: u32 = env
@@ -1586,16 +1593,8 @@ impl PredictionMarket {
 
         let timestamp = env.ledger().timestamp();
 
-        #[contractevent]
-        pub struct MarketCancelledEvent {
-            pub market_id: BytesN<32>,
-            pub creator: Address,
-            pub timestamp: u64,
-        }
-
         MarketCancelledEvent {
             market_id,
-            creator,
             timestamp,
         }
         .publish(&env);
