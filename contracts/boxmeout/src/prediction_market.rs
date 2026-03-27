@@ -27,15 +27,6 @@ pub struct LpPosition {
     pub fees_claimed: i128,
 }
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AmmPool {
-    pub market_id: u64,
-    pub reserves: Vec<i128>,
-    pub invariant_k: i128,
-    pub total_collateral: i128,
-}
-
 // ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
@@ -65,7 +56,6 @@ pub enum DataKey {
     UserPosition(Address, u64, u32), // (holder, market_id, outcome_id)
     UserMarketPositions(Address, u64), // (holder, market_id)
     LpPosition(Address, u64),          // (provider, market_id)
-    AmmPool(u64),                      // market_id
 }
 
 // Market state constants
@@ -175,8 +165,6 @@ pub struct TradeReceipt {
     PositionNotFound = 7,
     /// LP position not found for the given key
     LpPositionNotFound = 8,
-    /// AMM pool not initialized for the given market
-    PoolNotInitialized = 9,
 }
 
 // ---------------------------------------------------------------------------
@@ -385,11 +373,36 @@ impl PredictionMarketContract {
         let market_state: u32 = env
             .storage()
             .persistent()
-            .get(&DataKey::MarketState(market_id.clone()))
-            .unwrap_or(MARKET_CLOSED);
-        if market_state != MARKET_OPEN {
-            return Err(PredictionMarketError::MarketNotOpen);
-        }
+            .get(&DataKey::UserMarketPositions(holder, market_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Returns the LP position for `(provider, market_id)`.
+    /// Errors with `LpPositionNotFound` if absent.
+    pub fn get_lp_position(
+        env: Env,
+        provider: Address,
+        market_id: u64,
+    ) -> Result<LpPosition, PredictionMarketError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LpPosition(provider, market_id))
+            .ok_or(PredictionMarketError::LpPositionNotFound)
+    }
+
+    /// Returns all outcome positions held by `holder` in `market_id`.
+    /// Returns an empty `Vec` if none exist.
+    pub fn get_user_market_positions(
+        env: Env,
+        holder: Address,
+        market_id: u64,
+    ) -> Vec<UserPosition> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserMarketPositions(holder, market_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+}
 
         // 3b. Betting window must still be open
         let betting_close: u64 = env
