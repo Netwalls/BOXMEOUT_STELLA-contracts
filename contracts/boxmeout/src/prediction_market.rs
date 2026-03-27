@@ -27,15 +27,6 @@ pub struct LpPosition {
     pub fees_claimed: i128,
 }
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AmmPool {
-    pub market_id: u64,
-    pub reserves: Vec<i128>,
-    pub invariant_k: i128,
-    pub total_collateral: i128,
-}
-
 // ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
@@ -46,6 +37,40 @@ pub enum DataKey {
     Config,
     NextMarketId,
     EmergencyPause,
+
+
+    Market(u64),   // keyed by market_id
+    Operator,      // designated operator address (optional)
+}
+
+// ---------------------------------------------------------------------------
+// Market status
+// ---------------------------------------------------------------------------
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MarketStatus {
+    Open,
+    Paused,
+    Closed,
+    Resolved,
+    Cancelled,
+}
+
+// ---------------------------------------------------------------------------
+// Market struct
+// ---------------------------------------------------------------------------
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Market {
+    pub market_id: u64,
+    pub creator: Address,
+    pub status: MarketStatus,
+    pub created_at: u64,
+    pub closed_at: Option<u64>,
+
+
     /// Per-market state: (market_id, state_u32)
     MarketState(BytesN<32>),
     /// Per-market betting close time
@@ -65,7 +90,7 @@ pub enum DataKey {
     UserPosition(Address, u64, u32), // (holder, market_id, outcome_id)
     UserMarketPositions(Address, u64), // (holder, market_id)
     LpPosition(Address, u64),          // (provider, market_id)
-    AmmPool(u64),                      // market_id
+
 }
 
 // Market state constants
@@ -100,6 +125,10 @@ pub struct Config {
     pub max_outcomes: u32,
     /// Bond required to open a dispute (in token units)
     pub dispute_bond: i128,
+
+    /// Whether the contract is currently emergency-paused
+    pub emergency_paused: bool,
+
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +151,8 @@ pub enum PredictionMarketError {
     InvalidMaxOutcomes = 5,
     /// dispute_bond must be > 0
     InvalidDisputeBond = 6,
+
+
     /// Contract is globally paused
     ContractPaused = 7,
     /// Market is not in Open state
@@ -140,12 +171,6 @@ pub enum PredictionMarketError {
     InvalidCollateral = 14,
     /// caller does not hold enough shares of every outcome to merge
     InsufficientSharesForMerge = 15,
-    /// Resolution deadline has not been reached yet
-    TooEarlyToReport = 16,
-    /// Market is not in a reportable state
-    MarketNotReportable = 17,
-    /// proposed_outcome_id is out of range
-    InvalidOutcome = 18,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,15 +182,6 @@ pub enum PredictionMarketError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Position {
     pub shares: i128,
-}
-
-/// Oracle report persisted during phase-1 resolution.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OracleReport {
-    pub oracle: Address,
-    pub proposed_outcome: u32,
-    pub reported_at: u64,
 }
 
 /// Returned by sell_shares to summarise the completed trade.
@@ -181,17 +197,31 @@ pub struct TradeReceipt {
     pub creator_fee: i128,
     pub net_collateral_out: i128,
 
+
     /// Caller is not the admin
     Unauthorized = 7,
     /// Contract has not been initialized yet
     NotInitialized = 8,
 
+    /// Contract is emergency-paused; all mutating operations are blocked
+    EmergencyPaused = 9,
+    /// Pause requested but contract is already paused
+    AlreadyPaused = 10,
+    /// Unpause requested but contract is not paused
+    AlreadyUnpaused = 11,
+
+    /// Market not found in storage
+    MarketNotFound = 12,
+    /// Market is already closed or in a terminal state
+    InvalidMarketStatus = 13,
+
+
+
     /// Position not found for the given key
     PositionNotFound = 7,
     /// LP position not found for the given key
     LpPositionNotFound = 8,
-    /// AMM pool not initialized for the given market
-    PoolNotInitialized = 9,
+
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +240,34 @@ pub mod events {
         pub protocol_fee_bps: u32,
         pub creator_fee_bps: u32,
     }
+
+
+
+    #[contractevent]
+    pub struct DisputeBondUpdated {
+        pub admin: Address,
+        pub old_bond: i128,
+        pub new_bond: i128,
+    }
+
+    #[contractevent]
+    pub struct EmergencyPaused {
+        pub admin: Address,
+        pub timestamp: u64,
+    }
+
+    #[contractevent]
+    pub struct EmergencyUnpaused {
+        pub admin: Address,
+        pub timestamp: u64,
+    }
+
+
+    #[contractevent]
+    pub struct MarketClosed {
+        pub market_id: u64,
+        pub closed_by: Address,
+        pub timestamp: u64,
 
     #[contractevent]
     pub struct SharesSold {
@@ -231,26 +289,11 @@ pub mod events {
     }
 
     #[contractevent]
-    pub struct PositionMerged {
-        pub market_id: BytesN<32>,
-        pub caller: Address,
-        pub shares: i128,
-        pub num_outcomes: u32,
-    }
-
-    #[contractevent]
-    pub struct OutcomeReported {
-        pub market_id: BytesN<32>,
-        pub oracle: Address,
-        pub proposed_outcome: u32,
-        pub reported_at: u64,
-    }
-
-    #[contractevent]
     pub struct DisputeBondUpdated {
         pub admin: Address,
         pub old_bond: i128,
         pub new_bond: i128,
+
     }
 
 }
@@ -322,6 +365,9 @@ impl PredictionMarketContract {
             min_trade,
             max_outcomes,
             dispute_bond,
+
+            emergency_paused: false,
+
         };
 
         // ── Atomic writes (all succeed or none) ──────────────────────────────
@@ -367,6 +413,471 @@ impl PredictionMarketContract {
             .unwrap_or(false)
     }
 
+
+    /// Admin-only: update the minimum dispute bond.
+    ///
+    /// - Requires the stored admin's signature.
+    /// - Rejects `new_bond <= 0` with `InvalidDisputeBond`.
+    /// - Loads Config, replaces only `dispute_bond`, and persists atomically.
+    /// - Emits `events::DisputeBondUpdated` on success.
+    /// - No state is modified on any failure path.
+    pub fn update_dispute_bond(
+        env: Env,
+        admin: Address,
+        new_bond: i128,
+    ) -> Result<(), PredictionMarketError> {
+        // ── Circuit-breaker check ────────────────────────────────────────────
+        Self::require_not_paused(&env)?;
+
+        // ── Load config (errors if not yet initialized) ──────────────────────
+        let mut config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::NotInitialized)?;
+
+        // ── Strict admin authorization ───────────────────────────────────────
+        // Verify the caller matches the stored admin before requiring auth,
+        // so an attacker cannot force an auth check on an arbitrary address.
+        if admin != config.admin {
+            return Err(PredictionMarketError::Unauthorized);
+        }
+        admin.require_auth();
+
+        // ── Validate new bond ────────────────────────────────────────────────
+        if new_bond <= 0 {
+            return Err(PredictionMarketError::InvalidDisputeBond);
+        }
+
+        // ── Atomic update (single field, no partial writes) ──────────────────
+        let old_bond = config.dispute_bond;
+        config.dispute_bond = new_bond;
+        env.storage().persistent().set(&DataKey::Config, &config);
+
+        // ── Emit event ───────────────────────────────────────────────────────
+        events::DisputeBondUpdated {
+            admin,
+            old_bond,
+            new_bond,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    // ── Pause guard (shared by all mutating functions) ───────────────────────
+
+    fn require_not_paused(env: &Env) -> Result<(), PredictionMarketError> {
+        let paused: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EmergencyPause)
+            .unwrap_or(false);
+        if paused {
+            return Err(PredictionMarketError::EmergencyPaused);
+        }
+        Ok(())
+    }
+
+    // ── Admin helper (shared auth check) ────────────────────────────────────
+
+    fn require_admin(
+        env: &Env,
+        caller: &Address,
+    ) -> Result<Config, PredictionMarketError> {
+        let config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::NotInitialized)?;
+        if *caller != config.admin {
+            return Err(PredictionMarketError::Unauthorized);
+        }
+        caller.require_auth();
+        Ok(config)
+    }
+
+    /// Admin-only: pause all state-mutating operations.
+    /// Rejected if already paused.
+    pub fn emergency_pause(
+        env: Env,
+        admin: Address,
+    ) -> Result<(), PredictionMarketError> {
+        let mut config = Self::require_admin(&env, &admin)?;
+
+        if config.emergency_paused {
+            return Err(PredictionMarketError::AlreadyPaused);
+        }
+
+        // Atomic: update both storage locations together
+        config.emergency_paused = true;
+        env.storage().persistent().set(&DataKey::Config, &config);
+        env.storage()
+            .persistent()
+            .set(&DataKey::EmergencyPause, &true);
+
+        events::EmergencyPaused {
+            admin,
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Admin-only: lift the emergency pause.
+    /// Rejected if not currently paused.
+    pub fn emergency_unpause(
+        env: Env,
+        admin: Address,
+    ) -> Result<(), PredictionMarketError> {
+        let mut config = Self::require_admin(&env, &admin)?;
+
+        if !config.emergency_paused {
+            return Err(PredictionMarketError::AlreadyUnpaused);
+        }
+
+        // Atomic: update both storage locations together
+        config.emergency_paused = false;
+        env.storage().persistent().set(&DataKey::Config, &config);
+        env.storage()
+            .persistent()
+            .set(&DataKey::EmergencyPause, &false);
+
+        events::EmergencyUnpaused {
+            admin,
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Example state-mutating function guarded by the circuit breaker.
+    /// Any real mutating function follows the same pattern: check pause first.
+    pub fn buy_shares(
+        env: Env,
+        _buyer: Address,
+        _market_id: u64,
+        _outcome: u32,
+        _amount: i128,
+    ) -> Result<(), PredictionMarketError> {
+        // ── Circuit-breaker check (must be first) ────────────────────────────
+        Self::require_not_paused(&env)?;
+
+        // ... actual buy logic would follow here ...
+        Ok(())
+    }
+
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Env};
+
+
+
+
+    /// Admin-only: update the minimum dispute bond.
+    ///
+    /// - Requires the stored admin's signature.
+    /// - Rejects `new_bond <= 0` with `InvalidDisputeBond`.
+    /// - Loads Config, replaces only `dispute_bond`, and persists atomically.
+    /// - Emits `events::DisputeBondUpdated` on success.
+    /// - No state is modified on any failure path.
+    pub fn update_dispute_bond(
+        env: Env,
+        admin: Address,
+        new_bond: i128,
+    ) -> Result<(), PredictionMarketError> {
+        // ── Circuit-breaker check ────────────────────────────────────────────
+        Self::require_not_paused(&env)?;
+
+        // ── Load config (errors if not yet initialized) ──────────────────────
+        let mut config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::NotInitialized)?;
+
+        // ── Strict admin authorization ───────────────────────────────────────
+        // Verify the caller matches the stored admin before requiring auth,
+        // so an attacker cannot force an auth check on an arbitrary address.
+        if admin != config.admin {
+            return Err(PredictionMarketError::Unauthorized);
+        }
+        admin.require_auth();
+
+        // ── Validate new bond ────────────────────────────────────────────────
+        if new_bond <= 0 {
+            return Err(PredictionMarketError::InvalidDisputeBond);
+        }
+
+        // ── Atomic update (single field, no partial writes) ──────────────────
+        let old_bond = config.dispute_bond;
+        config.dispute_bond = new_bond;
+        env.storage().persistent().set(&DataKey::Config, &config);
+
+        // ── Emit event ───────────────────────────────────────────────────────
+        events::DisputeBondUpdated {
+            admin,
+            old_bond,
+            new_bond,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    // ── Pause guard (shared by all mutating functions) ───────────────────────
+
+    fn require_not_paused(env: &Env) -> Result<(), PredictionMarketError> {
+        let paused: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EmergencyPause)
+            .unwrap_or(false);
+        if paused {
+            return Err(PredictionMarketError::EmergencyPaused);
+        }
+        Ok(())
+    }
+
+    // ── Admin helper (shared auth check) ────────────────────────────────────
+
+    fn require_admin(
+        env: &Env,
+        caller: &Address,
+    ) -> Result<Config, PredictionMarketError> {
+        let config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::NotInitialized)?;
+        if *caller != config.admin {
+            return Err(PredictionMarketError::Unauthorized);
+        }
+        caller.require_auth();
+        Ok(config)
+    }
+
+    /// Admin-only: pause all state-mutating operations.
+    /// Rejected if already paused.
+    pub fn emergency_pause(
+        env: Env,
+        admin: Address,
+    ) -> Result<(), PredictionMarketError> {
+        let mut config = Self::require_admin(&env, &admin)?;
+
+        if config.emergency_paused {
+            return Err(PredictionMarketError::AlreadyPaused);
+        }
+
+        // Atomic: update both storage locations together
+        config.emergency_paused = true;
+        env.storage().persistent().set(&DataKey::Config, &config);
+        env.storage()
+            .persistent()
+            .set(&DataKey::EmergencyPause, &true);
+
+        events::EmergencyPaused {
+            admin,
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Admin-only: lift the emergency pause.
+    /// Rejected if not currently paused.
+    pub fn emergency_unpause(
+        env: Env,
+        admin: Address,
+    ) -> Result<(), PredictionMarketError> {
+        let mut config = Self::require_admin(&env, &admin)?;
+
+        if !config.emergency_paused {
+            return Err(PredictionMarketError::AlreadyUnpaused);
+        }
+
+        // Atomic: update both storage locations together
+        config.emergency_paused = false;
+        env.storage().persistent().set(&DataKey::Config, &config);
+        env.storage()
+            .persistent()
+            .set(&DataKey::EmergencyPause, &false);
+
+        events::EmergencyUnpaused {
+            admin,
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Example state-mutating function guarded by the circuit breaker.
+    /// Any real mutating function follows the same pattern: check pause first.
+    pub fn buy_shares(
+        env: Env,
+        _buyer: Address,
+        _market_id: u64,
+        _outcome: u32,
+        _amount: i128,
+    ) -> Result<(), PredictionMarketError> {
+        // ── Circuit-breaker check (must be first) ────────────────────────────
+        Self::require_not_paused(&env)?;
+
+        // ... actual buy logic would follow here ...
+        Ok(())
+    }
+
+    // ── Operator management ──────────────────────────────────────────────────
+
+    /// Admin-only: designate an operator address that may also close markets.
+    pub fn set_operator(
+        env: Env,
+        admin: Address,
+        operator: Address,
+    ) -> Result<(), PredictionMarketError> {
+        Self::require_not_paused(&env)?;
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Operator, &operator);
+        Ok(())
+    }
+
+    /// Read the current operator (if any).
+    pub fn get_operator(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::Operator)
+    }
+
+    // ── Market helpers ───────────────────────────────────────────────────────
+
+    /// Read a market by id.
+    pub fn get_market(env: Env, market_id: u64) -> Option<Market> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Market(market_id))
+    }
+
+    /// Internal: create a market in Open state (used by tests and future
+    /// create_market implementation).
+    fn create_market_internal(env: &Env, creator: Address) -> u64 {
+        let market_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextMarketId)
+            .unwrap_or(1);
+
+        let market = Market {
+            market_id,
+            creator,
+            status: MarketStatus::Open,
+            created_at: env.ledger().timestamp(),
+            closed_at: None,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Market(market_id), &market);
+        env.storage()
+            .persistent()
+            .set(&DataKey::NextMarketId, &(market_id + 1));
+
+        market_id
+    }
+
+    // ── Authorization helper: admin OR operator ──────────────────────────────
+
+    fn require_admin_or_operator(
+        env: &Env,
+        caller: &Address,
+    ) -> Result<(), PredictionMarketError> {
+        let config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::NotInitialized)?;
+
+        let is_admin = *caller == config.admin;
+        let is_operator = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::Operator)
+            .map(|op| op == *caller)
+            .unwrap_or(false);
+
+        if !is_admin && !is_operator {
+            return Err(PredictionMarketError::Unauthorized);
+        }
+
+        caller.require_auth();
+        Ok(())
+    }
+
+    /// Admin or operator: manually close a market's betting window.
+    ///
+    /// - Requires caller to be admin or designated operator.
+    /// - Rejects if contract is emergency-paused.
+    /// - Rejects if market does not exist (`MarketNotFound`).
+    /// - Rejects if market status is not `Open` or `Paused` (`InvalidMarketStatus`).
+    /// - Atomically sets status to `Closed` and records `closed_at` timestamp.
+    /// - Emits `events::MarketClosed` exactly once on success.
+    /// - No state is modified on any failure path.
+    pub fn close_betting(
+        env: Env,
+        caller: Address,
+        market_id: u64,
+    ) -> Result<(), PredictionMarketError> {
+        // ── Circuit-breaker check ────────────────────────────────────────────
+        Self::require_not_paused(&env)?;
+
+        // ── Authorization: admin or operator ─────────────────────────────────
+        Self::require_admin_or_operator(&env, &caller)?;
+
+        // ── Load market ──────────────────────────────────────────────────────
+        let mut market: Market = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Market(market_id))
+            .ok_or(PredictionMarketError::MarketNotFound)?;
+
+        // ── Validate status: only Open or Paused may be closed ───────────────
+        match market.status {
+            MarketStatus::Open | MarketStatus::Paused => {}
+            _ => return Err(PredictionMarketError::InvalidMarketStatus),
+        }
+
+        // ── Atomic update ────────────────────────────────────────────────────
+        let now = env.ledger().timestamp();
+        market.status = MarketStatus::Closed;
+        market.closed_at = Some(now);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Market(market_id), &market);
+
+        // ── Emit event (exactly once) ────────────────────────────────────────
+        events::MarketClosed {
+            market_id,
+            closed_by: caller,
+            timestamp: now,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+}
+
+
     // ── sell_shares ──────────────────────────────────────────────────────────
 
     /// Exit a position before resolution by selling shares back to the CPMM.
@@ -407,6 +918,478 @@ impl PredictionMarketContract {
         // 3a. Market must be Open
         let market_state: u32 = env
             .storage()
+            .persistent()
+            .get(&DataKey::UserMarketPositions(holder, market_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Returns the LP position for `(provider, market_id)`.
+    /// Errors with `LpPositionNotFound` if absent.
+    pub fn get_lp_position(
+        env: Env,
+        provider: Address,
+        market_id: u64,
+    ) -> Result<LpPosition, PredictionMarketError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LpPosition(provider, market_id))
+            .ok_or(PredictionMarketError::LpPositionNotFound)
+    }
+
+    /// Returns all outcome positions held by `holder` in `market_id`.
+    /// Returns an empty `Vec` if none exist.
+    pub fn get_user_market_positions(
+        env: Env,
+        holder: Address,
+        market_id: u64,
+    ) -> Vec<UserPosition> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserMarketPositions(holder, market_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+}
+
+        // 3b. Betting window must still be open
+        let betting_close: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BettingCloseTime(market_id.clone()))
+            .unwrap_or(0);
+        if env.ledger().timestamp() >= betting_close {
+            return Err(PredictionMarketError::BettingClosed);
+        }
+
+        // 4. Validate position
+        let pos_key = DataKey::Position(market_id.clone(), seller.clone(), outcome);
+        let mut position: Position = env
+            .storage()
+            .persistent()
+            .get(&pos_key)
+            .ok_or(PredictionMarketError::NoPosition)?;
+        if shares_in > position.shares {
+            return Err(PredictionMarketError::InsufficientShares);
+        }
+
+        // 5. CPMM: gross_collateral = shares_in * opposing_reserve / (own_reserve + shares_in)
+        let (yes_reserve, no_reserve) = Self::get_reserves(&env, &market_id);
+        let (own_reserve, opposing_reserve) = if outcome == 1 {
+            (yes_reserve, no_reserve)
+        } else {
+            (no_reserve, yes_reserve)
+        };
+        let gross_collateral = crate::math::mul_div(
+            shares_in,
+            opposing_reserve,
+            own_reserve
+                .checked_add(shares_in)
+                .ok_or(PredictionMarketError::Overflow)?,
+        );
+
+        // 6. Fee deduction
+        let config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::MarketNotOpen)?; // config must exist
+        let protocol_fee = crate::math::mul_div(
+            gross_collateral,
+            config.protocol_fee_bps as i128,
+            10_000,
+        );
+        let creator_fee = crate::math::mul_div(
+            gross_collateral,
+            config.creator_fee_bps as i128,
+            10_000,
+        );
+        let net_collateral_out = gross_collateral - protocol_fee - creator_fee;
+        if net_collateral_out < min_collateral_out {
+            return Err(PredictionMarketError::SlippageExceeded);
+        }
+
+        // 7. Update AMM reserves
+        // Selling outcome shares: own_reserve increases by shares_in,
+        // opposing_reserve decreases by gross_collateral.
+        let (new_yes, new_no) = if outcome == 1 {
+            (
+                yes_reserve
+                    .checked_add(shares_in)
+                    .ok_or(PredictionMarketError::Overflow)?,
+                no_reserve - gross_collateral,
+            )
+        } else {
+            (
+                yes_reserve - gross_collateral,
+                no_reserve
+                    .checked_add(shares_in)
+                    .ok_or(PredictionMarketError::Overflow)?,
+            )
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::YesReserve(market_id.clone()), &new_yes);
+        env.storage()
+            .persistent()
+            .set(&DataKey::NoReserve(market_id.clone()), &new_no);
+
+        // 8. Distribute fees and net payout via token transfers
+        let token_client = token::Client::new(&env, &config.token);
+        let contract = env.current_contract_address();
+
+        // Net payout to seller
+        if net_collateral_out > 0 {
+            token_client.transfer(&contract, &seller, &net_collateral_out);
+        }
+        // Protocol fee to treasury
+        if protocol_fee > 0 {
+            token_client.transfer(&contract, &config.treasury, &protocol_fee);
+        }
+        // Creator fee to market creator
+        if creator_fee > 0 {
+            let creator: Address = env
+                .storage()
+                .persistent()
+                .get(&DataKey::MarketCreator(market_id.clone()))
+                .unwrap_or(config.treasury.clone());
+            token_client.transfer(&contract, &creator, &creator_fee);
+        }
+
+        // 9. Update position (remove key if shares reach zero)
+        position.shares -= shares_in;
+        if position.shares == 0 {
+            env.storage().persistent().remove(&pos_key);
+        } else {
+            env.storage().persistent().set(&pos_key, &position);
+        }
+
+        // 10. Emit event
+        events::SharesSold {
+            market_id: market_id.clone(),
+            seller: seller.clone(),
+            outcome,
+            shares_sold: shares_in,
+            net_collateral_out,
+            protocol_fee,
+            creator_fee,
+        }
+        .publish(&env);
+
+        // 11. Return receipt
+        Ok(TradeReceipt {
+            market_id,
+            seller,
+            outcome,
+            shares_sold: shares_in,
+            gross_collateral,
+            protocol_fee,
+            creator_fee,
+            net_collateral_out,
+        })
+    }
+
+    // ── split_position / merge_position ─────────────────────────────────────
+
+    /// Split `collateral` units into 1 share of every outcome.
+    /// No AMM interaction — always a 1:1 value trade with no price impact or fee.
+    pub fn split_position(
+        env: Env,
+        market_id: BytesN<32>,
+        caller: Address,
+        collateral: i128,
+    ) -> Result<(), PredictionMarketError> {
+        // 1. Global pause guard
+        if env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&DataKey::EmergencyPause)
+            .unwrap_or(false)
+        {
+            return Err(PredictionMarketError::ContractPaused);
+        }
+
+        // 2. Caller auth
+        caller.require_auth();
+
+        // 3. Market must be Open
+        let market_state: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MarketState(market_id.clone()))
+            .unwrap_or(MARKET_CLOSED);
+        if market_state != MARKET_OPEN {
+            return Err(PredictionMarketError::MarketNotOpen);
+        }
+
+        // 4. Validate collateral > 0
+        if collateral <= 0 {
+            return Err(PredictionMarketError::InvalidCollateral);
+        }
+
+        // 5. Transfer collateral from caller to contract
+        let config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::MarketNotOpen)?;
+        token::Client::new(&env, &config.token).transfer(
+            &caller,
+            &env.current_contract_address(),
+            &collateral,
+        );
+
+        // 6 & 7. Mint 1 share per outcome and update total_shares_outstanding
+        let num_outcomes: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NumOutcomes(market_id.clone()))
+            .unwrap_or(2); // default binary market
+
+        for outcome in 0..num_outcomes {
+            let pos_key = DataKey::Position(market_id.clone(), caller.clone(), outcome);
+            let current: i128 = env
+                .storage()
+                .persistent()
+                .get(&pos_key)
+                .map(|p: Position| p.shares)
+                .unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&pos_key, &Position { shares: current + collateral });
+
+            let ts_key = DataKey::TotalSharesOutstanding(market_id.clone(), outcome);
+            let total: i128 = env.storage().persistent().get(&ts_key).unwrap_or(0);
+            env.storage().persistent().set(&ts_key, &(total + collateral));
+        }
+
+        // 8. Emit event
+        events::PositionSplit {
+            market_id,
+            caller,
+            collateral,
+            num_outcomes,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Merge `shares` of every outcome back into `shares` units of collateral.
+    /// Inverse of split_position — no fee, no AMM interaction.
+    pub fn merge_position(
+        env: Env,
+        market_id: BytesN<32>,
+        caller: Address,
+        shares: i128,
+    ) -> Result<(), PredictionMarketError> {
+        if env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&DataKey::EmergencyPause)
+            .unwrap_or(false)
+        {
+            return Err(PredictionMarketError::ContractPaused);
+        }
+
+        caller.require_auth();
+
+        let market_state: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MarketState(market_id.clone()))
+            .unwrap_or(MARKET_CLOSED);
+        if market_state != MARKET_OPEN {
+            return Err(PredictionMarketError::MarketNotOpen);
+        }
+
+        if shares <= 0 {
+            return Err(PredictionMarketError::InvalidCollateral);
+        }
+
+        let num_outcomes: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NumOutcomes(market_id.clone()))
+            .unwrap_or(2);
+
+        // Validate caller holds >= shares of every outcome before mutating
+        for outcome in 0..num_outcomes {
+            let pos_key = DataKey::Position(market_id.clone(), caller.clone(), outcome);
+            let held: i128 = env
+                .storage()
+                .persistent()
+                .get(&pos_key)
+                .map(|p: Position| p.shares)
+                .unwrap_or(0);
+            if held < shares {
+                return Err(PredictionMarketError::InsufficientSharesForMerge);
+            }
+        }
+
+        // Burn shares and update totals
+        for outcome in 0..num_outcomes {
+            let pos_key = DataKey::Position(market_id.clone(), caller.clone(), outcome);
+            let held: i128 = env
+                .storage()
+                .persistent()
+                .get(&pos_key)
+                .map(|p: Position| p.shares)
+                .unwrap_or(0);
+            let new_shares = held - shares;
+            if new_shares == 0 {
+                env.storage().persistent().remove(&pos_key);
+            } else {
+                env.storage()
+                    .persistent()
+                    .set(&pos_key, &Position { shares: new_shares });
+            }
+
+            let ts_key = DataKey::TotalSharesOutstanding(market_id.clone(), outcome);
+            let total: i128 = env.storage().persistent().get(&ts_key).unwrap_or(0);
+            env.storage().persistent().set(&ts_key, &(total - shares));
+        }
+
+        // Return collateral to caller
+        let config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::MarketNotOpen)?;
+        token::Client::new(&env, &config.token).transfer(
+            &env.current_contract_address(),
+            &caller,
+            &shares,
+        );
+
+    /// Admin-only: update the minimum dispute bond.
+    ///
+    /// - Requires the stored admin's signature.
+    /// - Rejects `new_bond <= 0` with `InvalidDisputeBond`.
+    /// - Loads Config, replaces only `dispute_bond`, and persists atomically.
+    /// - Emits `events::DisputeBondUpdated` on success.
+    /// - No state is modified on any failure path.
+    pub fn update_dispute_bond(
+    /// Returns the position for `(holder, market_id, outcome_id)`.
+    /// Errors with `PositionNotFound` if no position exists.
+    pub fn get_position(
+        env: Env,
+        market_id: BytesN<32>,
+        seller: Address,
+        outcome: u32,
+        shares_in: i128,
+        min_collateral_out: i128,
+    ) -> Result<TradeReceipt, PredictionMarketError> {
+        // 1. Global pause guard
+        if env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&DataKey::EmergencyPause)
+            .unwrap_or(false)
+        {
+            return Err(PredictionMarketError::ContractPaused);
+        }
+
+    // ── Internal AMM helpers ─────────────────────────────────────────────────
+
+    fn get_reserves(env: &Env, market_id: &BytesN<32>) -> (i128, i128) {
+        let yes: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::YesReserve(market_id.clone()))
+            .unwrap_or(0);
+        let no: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NoReserve(market_id.clone()))
+            .unwrap_or(0);
+        (yes, no)
+    }
+
+    // ── Test helpers ─────────────────────────────────────────────────────────
+
+    /// Test helper: seed a market with Open state, reserves, close time, and creator.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn test_setup_market(
+        env: Env,
+        market_id: BytesN<32>,
+        creator: Address,
+        betting_close: u64,
+        yes_reserve: i128,
+        no_reserve: i128,
+    ) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::MarketState(market_id.clone()), &MARKET_OPEN);
+        env.storage()
+            .persistent()
+            .set(&DataKey::BettingCloseTime(market_id.clone()), &betting_close);
+        env.storage()
+            .persistent()
+            .set(&DataKey::MarketCreator(market_id.clone()), &creator);
+        env.storage()
+            .persistent()
+            .set(&DataKey::YesReserve(market_id.clone()), &yes_reserve);
+        env.storage()
+            .persistent()
+            .set(&DataKey::NoReserve(market_id.clone()), &no_reserve);
+    }
+
+    /// Test helper: seed a user position.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn test_set_position(
+        env: Env,
+        market_id: BytesN<32>,
+        user: Address,
+        outcome: u32,
+        shares: i128,
+    ) {
+        env.storage().persistent().set(
+            &DataKey::Position(market_id, user, outcome),
+            &Position { shares },
+        );
+    }
+
+    /// Test helper: read a user position.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn test_get_position(
+        env: Env,
+        market_id: BytesN<32>,
+        user: Address,
+        outcome: u32,
+    ) -> Option<Position> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Position(market_id, user, outcome))
+    }
+
+    /// Test helper: read AMM reserves.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn test_get_reserves(env: Env, market_id: BytesN<32>) -> (i128, i128) {
+        Self::get_reserves(&env, &market_id)
+    }
+
+    /// Test helper: read total shares outstanding for an outcome.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn test_get_total_shares(env: Env, market_id: BytesN<32>, outcome: u32) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TotalSharesOutstanding(market_id, outcome))
+            .unwrap_or(0)
+    }
+
+    /// Test helper: set number of outcomes for a market.
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn test_set_num_outcomes(env: Env, market_id: BytesN<32>, num_outcomes: u32) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::NumOutcomes(market_id), &num_outcomes);
+    /// Returns all outcome positions held by `holder` in `market_id`.
+    /// Returns an empty `Vec` if none exist.
+    pub fn get_user_market_positions(
+        env: Env,
+        holder: Address,
+        market_id: u64,
+    ) -> Vec<UserPosition> {
+        env.storage()
             .persistent()
             .get(&DataKey::MarketState(market_id.clone()))
             .unwrap_or(MARKET_CLOSED);
@@ -1468,6 +2451,8 @@ mod tests {
         assert!(client.try_update_dispute_bond(&admin, &1_000i128).is_ok());
     }
 
+    // ── happy path: Closed market ─────────────────────────────────────────────
+
     #[test]
     fn test_update_dispute_bond_persisted() {
         let (env, cid, admin, treasury, oracle, token) = setup();
@@ -1559,6 +2544,8 @@ mod tests {
         let result = client.try_update_dispute_bond(&admin, &-1i128);
         assert_eq!(result, Err(Ok(PredictionMarketError::InvalidDisputeBond)));
     }
+
+    // ── invalid outcome rejected ──────────────────────────────────────────────
 
     #[test]
     fn test_update_dispute_bond_invalid_does_not_mutate_state() {
@@ -1938,6 +2925,8 @@ mod split_position_tests {
         );
     }
 
+    // ── happy path ───────────────────────────────────────────────────────────
+
     #[test]
     fn test_split_updates_total_shares_outstanding() {
         let (_env, client, _cid, caller, market_id, _usdc) = setup(2, 500);
@@ -2211,7 +3200,6 @@ mod merge_positions_tests {
         let result = client.try_merge_positions(&market_id, &caller, &0i128);
         assert_eq!(result, Err(Ok(PredictionMarketError::InvalidCollateral)));
     }
-}
 
 // ---------------------------------------------------------------------------
 // report_outcome unit tests
@@ -2244,8 +3232,14 @@ mod report_outcome_tests {
         let oracle = Address::generate(&env);
         let token = Address::generate(&env);
 
-        let cid = env.register(PredictionMarketContract, ());
+    #[test]
+    fn test_update_dispute_bond_zero_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
         let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_update_dispute_bond(&admin, &0i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::InvalidDisputeBond)));
+    }
 
         client
             .try_initialize(
@@ -2295,6 +3289,8 @@ mod report_outcome_tests {
         let report = client.test_get_oracle_report(&market_id).unwrap();
         assert_eq!(report.proposed_outcome, 1);
     }
+
+    // -- emergency_pause happy path -------------------------------------------
 
     #[test]
     fn test_report_outcome_open_past_betting_close_succeeds() {
@@ -2360,6 +3356,8 @@ mod report_outcome_tests {
         assert_eq!(result, Err(Ok(PredictionMarketError::InvalidOutcome)));
     }
 
+    // -- redundant call prevention --------------------------------------------
+
     #[test]
     fn test_invalid_outcome_large_id_rejected() {
         let (env, client, _cid, _oracle, market_id) =
@@ -2392,6 +3390,854 @@ mod report_outcome_tests {
         let result = client.try_report_outcome(&market_id, &0u32);
         assert_eq!(result, Err(Ok(PredictionMarketError::MarketNotReportable)));
     }
+}
+
+// ---------------------------------------------------------------------------
+// sell_shares unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod sell_shares_tests {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token, Address, BytesN, Env,
+    };
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pause_unauthorized_does_not_mutate_state() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let attacker = Address::generate(&env);
+        let _ = do_pause(&env, &cid, &attacker);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(!client.is_paused());
+    }
+
+    /// Registers the contract, initialises it, seeds a market and a position,
+    /// and mints collateral into the contract so payouts can be made.
+    fn setup_sell(
+        outcome: u32,
+        yes_reserve: i128,
+        no_reserve: i128,
+        user_shares: i128,
+    ) -> (
+        Env,
+        PredictionMarketContractClient<'static>,
+        Address, // contract id
+        Address, // seller
+        Address, // treasury
+        Address, // creator
+        BytesN<32>,
+        token::StellarAssetClient<'static>,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let usdc = create_token(&env, &token_admin);
+
+        let buyer = Address::generate(&env);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_buy_shares(&buyer, &1u64, &1u32, &100i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::EmergencyPaused)));
+    }
+
+        // Initialise with 2% protocol fee, 1% creator fee
+        client
+            .try_initialize(
+                &admin,
+                &treasury,
+                &oracle,
+                &usdc.address,
+                &200u32,
+                &100u32,
+                &1_000i128,
+                &100i128,
+                &2u32,
+                &500i128,
+            )
+            .unwrap();
+
+        let market_id = BytesN::from_array(&env, &[1u8; 32]);
+
+        // Ledger time = 1000; betting closes at 5000
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        client.test_setup_market(
+            &market_id,
+            &creator,
+            &5_000u64,
+            &yes_reserve,
+            &no_reserve,
+        );
+        client.test_set_position(&market_id, &Address::generate(&env), &outcome, &0i128); // dummy
+        let seller = Address::generate(&env);
+        client.test_set_position(&market_id, &seller, &outcome, &user_shares);
+
+        // Mint enough collateral into the contract to cover any payout
+        usdc.mint(&cid, &1_000_000i128);
+
+        (env, client, cid, seller, treasury, creator, market_id, usdc)
+    }
+
+    // -- unpausing restores normal functionality ------------------------------
+
+    #[test]
+    fn test_sell_shares_happy_path_yes() {
+        // YES pool: 500_000, NO pool: 500_000
+        // Sell 10_000 YES shares
+        // gross = 10_000 * 500_000 / (500_000 + 10_000) = 9_803 (floor)
+        // protocol_fee = 9_803 * 200 / 10_000 = 196
+        // creator_fee  = 9_803 * 100 / 10_000 = 98
+        // net = 9_803 - 196 - 98 = 9_509
+        let (env, client, _cid, seller, _treasury, _creator, market_id, usdc) =
+            setup_sell(1, 500_000, 500_000, 50_000);
+
+        let receipt = client
+            .sell_shares(&market_id, &seller, &1u32, &10_000i128, &0i128)
+            .unwrap();
+
+        assert_eq!(receipt.shares_sold, 10_000);
+        assert_eq!(receipt.gross_collateral, 9_803);
+        assert_eq!(receipt.protocol_fee, 196);
+        assert_eq!(receipt.creator_fee, 98);
+        assert_eq!(receipt.net_collateral_out, 9_509);
+
+        // Seller received net payout
+        assert_eq!(usdc.balance(&seller), 9_509);
+
+        // Position reduced
+        let pos = client.test_get_position(&market_id, &seller, &1u32);
+        assert_eq!(pos.unwrap().shares, 40_000);
+
+        // Reserves updated: YES += shares_in, NO -= gross
+        let (yes, no) = client.test_get_reserves(&market_id);
+        assert_eq!(yes, 510_000);
+        assert_eq!(no, 490_197); // 500_000 - 9_803
+    }
+
+    #[test]
+    fn test_sell_shares_removes_position_when_zeroed() {
+        let (env, client, _cid, seller, _treasury, _creator, market_id, _usdc) =
+            setup_sell(0, 500_000, 500_000, 10_000);
+
+        // Sell entire position
+        client
+            .sell_shares(&market_id, &seller, &0u32, &10_000i128, &0i128)
+            .unwrap();
+
+        // Position key must be gone
+        let pos = client.test_get_position(&market_id, &seller, &0u32);
+        assert!(pos.is_none());
+    }
+
+    #[test]
+    fn test_sell_shares_emits_event() {
+        let (env, client, _cid, seller, _treasury, _creator, market_id, _usdc) =
+            setup_sell(1, 500_000, 500_000, 20_000);
+
+        client
+            .sell_shares(&market_id, &seller, &1u32, &5_000i128, &0i128)
+            .unwrap();
+
+        assert!(!env.events().all().is_empty());
+    }
+
+    // ── sell more than held is rejected ──────────────────────────────────────
+
+    #[test]
+    fn test_sell_more_than_held_rejected() {
+        let (env, client, _cid, seller, _treasury, _creator, market_id, _usdc) =
+            setup_sell(1, 500_000, 500_000, 5_000);
+
+        let result =
+            client.try_sell_shares(&market_id, &seller, &1u32, &10_000i128, &0i128);
+        assert_eq!(
+            result,
+            Err(Ok(PredictionMarketError::InsufficientShares))
+        );
+    }
+
+    // ── slippage guard ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_slippage_guard_rejects_when_net_below_min() {
+        // gross ≈ 9_803, net ≈ 9_509 — demand 10_000 → should fail
+        let (env, client, _cid, seller, _treasury, _creator, market_id, _usdc) =
+            setup_sell(1, 500_000, 500_000, 50_000);
+
+        let result =
+            client.try_sell_shares(&market_id, &seller, &1u32, &10_000i128, &10_000i128);
+        assert_eq!(
+            result,
+            Err(Ok(PredictionMarketError::SlippageExceeded))
+        );
+    }
+
+    #[test]
+    fn test_slippage_guard_passes_when_net_meets_min() {
+        let (env, client, _cid, seller, _treasury, _creator, market_id, _usdc) =
+            setup_sell(1, 500_000, 500_000, 50_000);
+
+        // min_collateral_out = 9_509 (exact net) — should succeed
+        let result =
+            client.try_sell_shares(&market_id, &seller, &1u32, &10_000i128, &9_509i128);
+        assert!(result.is_ok());
+    }
+
+    // ── double-sell after zeroing ─────────────────────────────────────────────
+
+    #[test]
+    fn test_double_sell_after_zeroing_rejected() {
+        let (env, client, _cid, seller, _treasury, _creator, market_id, _usdc) =
+            setup_sell(1, 500_000, 500_000, 10_000);
+
+        // First sell — clears position
+        client
+            .sell_shares(&market_id, &seller, &1u32, &10_000i128, &0i128)
+            .unwrap();
+
+        // Second sell — position key is gone → NoPosition
+        let result =
+            client.try_sell_shares(&market_id, &seller, &1u32, &1i128, &0i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::NoPosition)));
+    }
+
+    // ── pause guard ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sell_rejected_when_paused() {
+        let (env, client, cid, seller, _treasury, _creator, market_id, _usdc) =
+            setup_sell(1, 500_000, 500_000, 10_000);
+
+        // Manually set pause flag
+        env.as_contract(&cid, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::EmergencyPause, &true);
+        });
+
+        let result =
+            client.try_sell_shares(&market_id, &seller, &1u32, &5_000i128, &0i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::ContractPaused)));
+    }
+
+    // ── betting window closed ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_sell_rejected_after_betting_close() {
+        let (env, client, _cid, seller, _treasury, _creator, market_id, _usdc) =
+            setup_sell(1, 500_000, 500_000, 10_000);
+
+        // Advance past betting_close_time (5000)
+        env.ledger().with_mut(|l| l.timestamp = 6_000);
+
+        let result =
+            client.try_sell_shares(&market_id, &seller, &1u32, &5_000i128, &0i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::BettingClosed)));
+    }
+
+    // ── market not open ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sell_rejected_when_market_not_open() {
+        let (env, client, cid, seller, _treasury, _creator, market_id, _usdc) =
+            setup_sell(1, 500_000, 500_000, 10_000);
+
+        // Close the market
+        env.as_contract(&cid, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::MarketState(market_id.clone()), &MARKET_CLOSED);
+        });
+
+        let result =
+            client.try_sell_shares(&market_id, &seller, &1u32, &5_000i128, &0i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::MarketNotOpen)));
+    }
+
+// ---------------------------------------------------------------------------
+// split_position unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod split_position_tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, token, Address, BytesN, Env};
+
+    fn create_token<'a>(env: &Env, admin: &Address) -> token::StellarAssetClient<'a> {
+        let addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        token::StellarAssetClient::new(env, &addr)
+    }
+
+    /// Registers + initialises the contract, seeds an open market, mints
+    /// `caller_balance` collateral to `caller`, and returns everything needed.
+    fn setup(
+        num_outcomes: u32,
+        caller_balance: i128,
+    ) -> (
+        Env,
+        PredictionMarketContractClient<'static>,
+        Address, // contract id
+        Address, // caller
+        BytesN<32>,
+        token::StellarAssetClient<'static>,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let usdc = create_token(&env, &token_admin);
+
+    #[test]
+    fn test_close_betting_by_operator_success() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        let mid = setup_with_market(&env, &cid, &admin, &treasury, &oracle, &token);
+
+        let operator = Address::generate(&env);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        client.try_set_operator(&admin, &operator).unwrap();
+
+        client
+            .try_initialize(
+                &admin,
+                &treasury,
+                &oracle,
+                &usdc.address,
+                &200u32,
+                &100u32,
+                &1_000i128,
+                &100i128,
+                &num_outcomes,
+                &500i128,
+            )
+            .unwrap();
+
+        let market_id = BytesN::from_array(&env, &[2u8; 32]);
+        let creator = Address::generate(&env);
+        client.test_setup_market(&market_id, &creator, &9_999_999u64, &500_000, &500_000);
+        client.test_set_num_outcomes(&market_id, &num_outcomes);
+
+        let caller = Address::generate(&env);
+        usdc.mint(&caller, &caller_balance);
+        // Also mint into contract so merge can pay back
+        usdc.mint(&cid, &caller_balance);
+
+        (env, client, cid, caller, market_id, usdc)
+    }
+
+    // ── happy path ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_split_mints_one_share_per_outcome() {
+        let (_env, client, _cid, caller, market_id, _usdc) = setup(2, 1_000);
+
+        client.split_position(&market_id, &caller, &1_000i128).unwrap();
+
+        // Both outcomes get 1_000 shares
+        assert_eq!(
+            client.test_get_position(&market_id, &caller, &0u32).unwrap().shares,
+            1_000
+        );
+        assert_eq!(
+            client.test_get_position(&market_id, &caller, &1u32).unwrap().shares,
+            1_000
+        );
+    }
+
+    #[test]
+    fn test_split_updates_total_shares_outstanding() {
+        let (_env, client, _cid, caller, market_id, _usdc) = setup(2, 500);
+
+        client.split_position(&market_id, &caller, &500i128).unwrap();
+
+        assert_eq!(client.test_get_total_shares(&market_id, &0u32), 500);
+        assert_eq!(client.test_get_total_shares(&market_id, &1u32), 500);
+    }
+
+    #[test]
+    fn test_split_transfers_collateral_to_contract() {
+        let (_env, client, cid, caller, market_id, usdc) = setup(2, 1_000);
+
+        let before = usdc.balance(&caller);
+        client.split_position(&market_id, &caller, &1_000i128).unwrap();
+        assert_eq!(usdc.balance(&caller), before - 1_000);
+        // contract received it (net: minted 1_000 extra above, so balance >= 1_000)
+        assert!(usdc.balance(&cid) >= 1_000);
+    }
+
+    #[test]
+    fn test_split_emits_event() {
+        let (env, client, _cid, caller, market_id, _usdc) = setup(2, 200);
+        client.split_position(&market_id, &caller, &200i128).unwrap();
+        assert!(!env.events().all().is_empty());
+    }
+
+    // ── split → merge returns original collateral ─────────────────────────────
+
+    #[test]
+    fn test_split_then_merge_returns_original_collateral() {
+        let (_env, client, _cid, caller, market_id, usdc) = setup(2, 1_000);
+
+        let before = usdc.balance(&caller);
+
+        client.split_position(&market_id, &caller, &1_000i128).unwrap();
+        assert_eq!(usdc.balance(&caller), before - 1_000);
+
+        client.merge_position(&market_id, &caller, &1_000i128).unwrap();
+        assert_eq!(usdc.balance(&caller), before);
+
+        // Positions cleaned up
+        assert!(client.test_get_position(&market_id, &caller, &0u32).is_none());
+        assert!(client.test_get_position(&market_id, &caller, &1u32).is_none());
+    }
+
+    // ── error cases ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_split_zero_collateral_rejected() {
+        let (_env, client, _cid, caller, market_id, _usdc) = setup(2, 1_000);
+        let result = client.try_split_position(&market_id, &caller, &0i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::InvalidCollateral)));
+    }
+
+    #[test]
+    fn test_split_market_not_open_rejected() {
+        let (env, client, cid, caller, market_id, _usdc) = setup(2, 1_000);
+        env.as_contract(&cid, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::MarketState(market_id.clone()), &MARKET_CLOSED);
+        });
+        let result = client.try_split_position(&market_id, &caller, &500i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::MarketNotOpen)));
+    }
+
+    #[test]
+    fn test_split_paused_rejected() {
+        let (env, client, cid, caller, market_id, _usdc) = setup(2, 1_000);
+        env.as_contract(&cid, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::EmergencyPause, &true);
+        });
+        let result = client.try_split_position(&market_id, &caller, &500i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_merge_insufficient_shares_rejected() {
+        let (_env, client, _cid, caller, market_id, _usdc) = setup(2, 1_000);
+
+        // Split 500, then try to merge 600
+        client.split_position(&market_id, &caller, &500i128).unwrap();
+        let result = client.try_merge_position(&market_id, &caller, &600i128);
+        assert_eq!(
+            result,
+            Err(Ok(PredictionMarketError::InsufficientSharesForMerge))
+        );
+    }
+
+
+
+    // =========================================================================
+    // update_dispute_bond tests (Issue #255)
+    // =========================================================================
+
+    // -- happy path -----------------------------------------------------------
+
+    #[test]
+    fn test_update_dispute_bond_success() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(client.try_update_dispute_bond(&admin, &1_000i128).is_ok());
+    }
+
+    #[test]
+    fn test_update_dispute_bond_persisted() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        client.try_update_dispute_bond(&admin, &9_999i128).unwrap();
+        assert_eq!(client.get_config().unwrap().dispute_bond, 9_999);
+    }
+
+    #[test]
+    fn test_update_dispute_bond_preserves_other_fields() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        client.try_update_dispute_bond(&admin, &2_000i128).unwrap();
+        let config = client.get_config().unwrap();
+        assert_eq!(config.admin, admin);
+        assert_eq!(config.treasury, treasury);
+        assert_eq!(config.oracle, oracle);
+        assert_eq!(config.token, token);
+        assert_eq!(config.protocol_fee_bps, 200);
+        assert_eq!(config.creator_fee_bps, 100);
+        assert_eq!(config.min_liquidity, 1_000);
+        assert_eq!(config.min_trade, 100);
+        assert_eq!(config.max_outcomes, 2);
+        assert_eq!(config.dispute_bond, 2_000);
+    }
+
+    #[test]
+    fn test_update_dispute_bond_emits_event() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let before_count = env.events().all().len();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        client.try_update_dispute_bond(&admin, &750i128).unwrap();
+        assert!(env.events().all().len() > before_count);
+    }
+
+    #[test]
+    fn test_update_dispute_bond_multiple_times() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        client.try_update_dispute_bond(&admin, &100i128).unwrap();
+        client.try_update_dispute_bond(&admin, &200i128).unwrap();
+        client.try_update_dispute_bond(&admin, &300i128).unwrap();
+        assert_eq!(client.get_config().unwrap().dispute_bond, 300);
+    }
+
+    // -- authorization --------------------------------------------------------
+
+    #[test]
+    fn test_update_dispute_bond_non_admin_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let attacker = Address::generate(&env);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_update_dispute_bond(&attacker, &1_000i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_update_dispute_bond_unauthorized_does_not_mutate_state() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let original_bond = client.get_config().unwrap().dispute_bond;
+        let attacker = Address::generate(&env);
+        let _ = client.try_update_dispute_bond(&attacker, &99_999i128);
+        assert_eq!(client.get_config().unwrap().dispute_bond, original_bond);
+    }
+
+    // -- validation -----------------------------------------------------------
+
+    #[test]
+    fn test_update_dispute_bond_zero_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_update_dispute_bond(&admin, &0i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::InvalidDisputeBond)));
+    }
+
+    #[test]
+    fn test_update_dispute_bond_negative_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_update_dispute_bond(&admin, &-1i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::InvalidDisputeBond)));
+    }
+
+    #[test]
+    fn test_update_dispute_bond_invalid_does_not_mutate_state() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let original_bond = client.get_config().unwrap().dispute_bond;
+        let _ = client.try_update_dispute_bond(&admin, &0i128);
+        assert_eq!(client.get_config().unwrap().dispute_bond, original_bond);
+    }
+
+    // -- not initialized ------------------------------------------------------
+
+    #[test]
+    fn test_update_dispute_bond_before_init_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let cid = env.register(PredictionMarketContract, ());
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_update_dispute_bond(&admin, &500i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::NotInitialized)));
+    }
+
+
+    // =========================================================================
+    // emergency_pause / emergency_unpause tests (Issue #256)
+    // =========================================================================
+
+    // -- helpers --------------------------------------------------------------
+
+    fn do_pause(
+        env: &Env,
+        cid: &Address,
+        admin: &Address,
+    ) -> Result<(), PredictionMarketError> {
+        PredictionMarketContractClient::new(env, cid).try_emergency_pause(admin)
+    }
+
+    fn do_unpause(
+        env: &Env,
+        cid: &Address,
+        admin: &Address,
+    ) -> Result<(), PredictionMarketError> {
+        PredictionMarketContractClient::new(env, cid).try_emergency_unpause(admin)
+    }
+
+    // -- emergency_pause happy path -------------------------------------------
+
+    #[test]
+    fn test_emergency_pause_success() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        assert!(do_pause(&env, &cid, &admin).is_ok());
+    }
+
+    #[test]
+    fn test_emergency_pause_sets_flag_true() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(client.is_paused());
+        assert!(client.get_config().unwrap().emergency_paused);
+    }
+
+    #[test]
+    fn test_emergency_pause_both_storage_locations_consistent() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        // DataKey::EmergencyPause and Config.emergency_paused must agree
+        assert_eq!(client.is_paused(), client.get_config().unwrap().emergency_paused);
+    }
+
+    #[test]
+    fn test_emergency_pause_emits_event() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let before = env.events().all().len();
+        do_pause(&env, &cid, &admin).unwrap();
+        assert!(env.events().all().len() > before);
+    }
+
+    // -- emergency_unpause happy path -----------------------------------------
+
+    #[test]
+    fn test_emergency_unpause_success() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        assert!(do_unpause(&env, &cid, &admin).is_ok());
+    }
+
+    #[test]
+    fn test_emergency_unpause_clears_flag() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        do_unpause(&env, &cid, &admin).unwrap();
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(!client.is_paused());
+        assert!(!client.get_config().unwrap().emergency_paused);
+    }
+
+    #[test]
+    fn test_emergency_unpause_both_storage_locations_consistent() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        do_unpause(&env, &cid, &admin).unwrap();
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert_eq!(client.is_paused(), client.get_config().unwrap().emergency_paused);
+    }
+
+    #[test]
+    fn test_emergency_unpause_emits_event() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        let before = env.events().all().len();
+        do_unpause(&env, &cid, &admin).unwrap();
+        assert!(env.events().all().len() > before);
+    }
+
+    // -- redundant call prevention --------------------------------------------
+
+    #[test]
+    fn test_pause_when_already_paused_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        let result = do_pause(&env, &cid, &admin);
+        assert_eq!(result, Err(Ok(PredictionMarketError::AlreadyPaused)));
+    }
+
+    #[test]
+    fn test_unpause_when_not_paused_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let result = do_unpause(&env, &cid, &admin);
+        assert_eq!(result, Err(Ok(PredictionMarketError::AlreadyUnpaused)));
+    }
+
+    // -- authorization --------------------------------------------------------
+
+    #[test]
+    fn test_pause_non_admin_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let attacker = Address::generate(&env);
+        let result = do_pause(&env, &cid, &attacker);
+        assert_eq!(result, Err(Ok(PredictionMarketError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_unpause_non_admin_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        let attacker = Address::generate(&env);
+        let result = do_unpause(&env, &cid, &attacker);
+        assert_eq!(result, Err(Ok(PredictionMarketError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_pause_unauthorized_does_not_mutate_state() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let attacker = Address::generate(&env);
+        let _ = do_pause(&env, &cid, &attacker);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(!client.is_paused());
+    }
+
+    // -- mutating functions blocked while paused ------------------------------
+
+    #[test]
+    fn test_buy_shares_blocked_when_paused() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+
+        let buyer = Address::generate(&env);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_buy_shares(&buyer, &1u64, &1u32, &100i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::EmergencyPaused)));
+    }
+
+    #[test]
+    fn test_update_dispute_bond_blocked_when_paused() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_update_dispute_bond(&admin, &999i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::EmergencyPaused)));
+    }
+
+    #[test]
+    fn test_no_state_change_while_paused() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let bond_before = client.get_config().unwrap().dispute_bond;
+        let _ = client.try_update_dispute_bond(&admin, &999i128);
+        assert_eq!(client.get_config().unwrap().dispute_bond, bond_before);
+    }
+
+    // -- unpausing restores normal functionality ------------------------------
+
+    #[test]
+    fn test_buy_shares_allowed_after_unpause() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        do_unpause(&env, &cid, &admin).unwrap();
+
+        let buyer = Address::generate(&env);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        // Should no longer return EmergencyPaused
+        let result = client.try_buy_shares(&buyer, &1u64, &1u32, &100i128);
+        assert_ne!(result, Err(Ok(PredictionMarketError::EmergencyPaused)));
+    }
+
+    #[test]
+    fn test_update_dispute_bond_allowed_after_unpause() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        do_pause(&env, &cid, &admin).unwrap();
+        do_unpause(&env, &cid, &admin).unwrap();
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(client.try_update_dispute_bond(&admin, &999i128).is_ok());
+    }
+
+    // -- not initialized ------------------------------------------------------
+
+    #[test]
+    fn test_pause_before_init_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let cid = env.register(PredictionMarketContract, ());
+        let result = do_pause(&env, &cid, &admin);
+        assert_eq!(result, Err(Ok(PredictionMarketError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_unpause_before_init_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let cid = env.register(PredictionMarketContract, ());
+        let result = do_unpause(&env, &cid, &admin);
+        assert_eq!(result, Err(Ok(PredictionMarketError::NotInitialized)));
+    }
+
+    // -- pause/unpause cycle --------------------------------------------------
+
+    #[test]
+    fn test_multiple_pause_unpause_cycles() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+
+        for _ in 0..3 {
+            do_pause(&env, &cid, &admin).unwrap();
+            do_unpause(&env, &cid, &admin).unwrap();
+        }
+
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(!client.is_paused());
+    }
+
 }
 
 // ---------------------------------------------------------------------------
