@@ -38,9 +38,16 @@ pub enum DataKey {
     NextMarketId,
     EmergencyPause,
 
-
-    Market(u64),   // keyed by market_id
-    Operator,      // designated operator address (optional)
+    Market(u64),               // Meta-data keyed by market_id
+    MarketState(u64),          // Current status
+    BettingCloseTime(u64),     // Timestamp
+    MarketCreator(u64),        // Creator address
+    Position(u64, Address, u32), // (market_id, holder, outcome_id)
+    YesReserve(u64),           // AMM YES reserve (outcome 1)
+    NoReserve(u64),            // AMM NO reserve (outcome 0)
+    TotalShares(u64, u32),     // Total shares outstanding per outcome
+    LpPosition(u64, Address),  // LP position
+    Operator,                  // designated operator address
 }
 
 // ---------------------------------------------------------------------------
@@ -58,7 +65,7 @@ pub enum MarketStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Market struct
+// Market struct - Meta-data for the market
 // ---------------------------------------------------------------------------
 
 #[contracttype]
@@ -66,31 +73,9 @@ pub enum MarketStatus {
 pub struct Market {
     pub market_id: u64,
     pub creator: Address,
-    pub status: MarketStatus,
     pub created_at: u64,
     pub closed_at: Option<u64>,
-
-
-    /// Per-market state: (market_id, state_u32)
-    MarketState(BytesN<32>),
-    /// Per-market betting close time
-    BettingCloseTime(BytesN<32>),
-    /// Per-market creator address
-    MarketCreator(BytesN<32>),
-    /// Per-user, per-market, per-outcome position
-    Position(BytesN<32>, Address, u32),
-    /// Per-market AMM yes reserve
-    YesReserve(BytesN<32>),
-    /// Per-market AMM no reserve
-    NoReserve(BytesN<32>),
-    /// Total shares outstanding per outcome: (market_id, outcome)
-    TotalSharesOutstanding(BytesN<32>, u32),
-    /// Number of outcomes for a market
-    NumOutcomes(BytesN<32>),
-    UserPosition(Address, u64, u32), // (holder, market_id, outcome_id)
-    UserMarketPositions(Address, u64), // (holder, market_id)
-    LpPosition(Address, u64),          // (provider, market_id)
-
+    pub num_outcomes: u32,
 }
 
 // Market state constants
@@ -139,27 +124,11 @@ pub struct Config {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum PredictionMarketError {
-    /// initialize() was called a second time
     AlreadyInitialized = 1,
-    /// Sum of fee basis points exceeds 10 000
     FeesTooHigh = 2,
-    /// min_liquidity must be > 0
     InvalidMinLiquidity = 3,
-    /// min_trade must be > 0
     InvalidMinTrade = 4,
-    /// max_outcomes must be >= 2 and <= 256
     InvalidMaxOutcomes = 5,
-    /// dispute_bond must be > 0
-    InvalidDisputeBond = 6,
-
-
-    /// Contract is globally paused
-    ContractPaused = 7,
-    /// Market is not in Open state
-    MarketNotOpen = 8,
-    /// Betting window has closed
-    BettingClosed = 9,
-    /// Caller has no position for this outcome
     NoPosition = 10,
     /// Trying to sell more shares than held
     InsufficientShares = 11,
