@@ -1228,6 +1228,52 @@ impl AMM {
             total_lp_supply as i128,
         ) as u128
     }
+
+    /// Split `collateral` equally across `n` outcome buckets.
+    ///
+    /// Returns a `Vec`-like fixed array as a `soroban_sdk::Vec<u128>` is not
+    /// available in `no_std`; instead returns `(reserve_per_outcome, n)` as a
+    /// plain tuple so callers can reconstruct the full reserve list.
+    ///
+    /// Panics if `n < 2` or `collateral == 0`.
+    pub fn calc_initial_reserves(collateral: u128, n: u32) -> u128 {
+        if n < 2 {
+            panic!("n must be >= 2");
+        }
+        if collateral == 0 {
+            panic!("collateral must be > 0");
+        }
+        collateral / n as u128
+    }
+
+    /// Initial LP shares for a freshly seeded pool.
+    ///
+    /// Computes `sqrt(product_of_reserves)` using `math::sqrt` and
+    /// `math::checked_product`. Supports up to 32 outcomes (stack-allocated).
+    ///
+    /// Panics if `n > 32` or the product overflows.
+    pub fn calc_initial_lp_shares(reserve_per_outcome: u128, n: u32) -> u128 {
+        if n as usize > 32 {
+            panic!("n exceeds maximum supported outcomes");
+        }
+        let mut buf = [0u128; 32];
+        for i in 0..n as usize {
+            buf[i] = reserve_per_outcome;
+        }
+        let product = crate::math::checked_product(&buf[..n as usize]);
+        if product == 0 && reserve_per_outcome != 0 {
+            panic!("product overflow computing initial LP shares");
+        }
+        crate::math::sqrt(product)
+    }
+
+    /// CPMM invariant k = product of all reserves.
+    ///
+    /// Uses `math::checked_product` for overflow safety.
+    /// Returns 0 on overflow (caller should treat as invalid).
+    pub fn compute_invariant(reserves: &[u128]) -> u128 {
+        crate::math::checked_product(reserves)
+    }
 }
 
 #[cfg(test)]
@@ -1398,5 +1444,78 @@ mod tests {
     #[should_panic(expected = "total_lp_supply must be greater than 0")]
     fn test_calc_collateral_zero_supply_panics() {
         AMM::calc_collateral_from_lp(100, 1_000_000, 0);
+    }
+
+    // ── Issue: calc_initial_reserves / calc_initial_lp_shares / compute_invariant
+
+    #[test]
+    fn test_calc_initial_reserves_binary_50_50() {
+        // 100 USDC into a binary (n=2) market → 50 per outcome.
+        let reserve = AMM::calc_initial_reserves(100, 2);
+        assert_eq!(reserve, 50);
+    }
+
+    #[test]
+    fn test_calc_initial_reserves_n_outcomes() {
+        // 300 collateral, 3 outcomes → 100 each.
+        let reserve = AMM::calc_initial_reserves(300, 3);
+        assert_eq!(reserve, 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "n must be >= 2")]
+    fn test_calc_initial_reserves_n_less_than_2_panics() {
+        AMM::calc_initial_reserves(100, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "collateral must be > 0")]
+    fn test_calc_initial_reserves_zero_collateral_panics() {
+        AMM::calc_initial_reserves(0, 2);
+    }
+
+    #[test]
+    fn test_calc_initial_lp_shares_binary() {
+        // 100 USDC → 50/50 reserves → sqrt(50 * 50) = 50.
+        let reserve = AMM::calc_initial_reserves(100, 2);
+        let lp = AMM::calc_initial_lp_shares(reserve, 2);
+        assert_eq!(lp, 50);
+    }
+
+    #[test]
+    fn test_compute_invariant_binary() {
+        // k = 50 * 50 = 2500.
+        let k = AMM::compute_invariant(&[50, 50]);
+        assert_eq!(k, 2500);
+    }
+
+    #[test]
+    fn test_compute_invariant_overflow_returns_zero() {
+        let k = AMM::compute_invariant(&[u128::MAX, 2]);
+        assert_eq!(k, 0);
+    }
+
+    /// Acceptance test: 100 USDC binary market → 50/50 reserves → price = 50% each.
+    #[test]
+    fn test_binary_market_init_100_usdc_50_50_price() {
+        let collateral: u128 = 100;
+        let n: u32 = 2;
+
+        // Step 1: split collateral.
+        let reserve = AMM::calc_initial_reserves(collateral, n);
+        assert_eq!(reserve, 50, "each outcome reserve must be 50");
+
+        // Step 2: compute invariant k.
+        let k = AMM::compute_invariant(&[reserve, reserve]);
+        assert_eq!(k, 2500);
+
+        // Step 3: initial LP shares = sqrt(k) = sqrt(50*50) = 50.
+        let lp = AMM::calc_initial_lp_shares(reserve, n);
+        assert_eq!(lp, 50);
+
+        // Step 4: price of each outcome = reserve / total = 50/100 = 50%.
+        let total = reserve * n as u128;
+        let price_bps = (reserve * 10_000) / total; // basis points
+        assert_eq!(price_bps, 5_000, "price must be 50% (5000 bps)");
     }
 }
