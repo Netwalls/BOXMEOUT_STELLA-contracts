@@ -190,6 +190,10 @@ pub struct TradeReceipt {
     PositionNotFound = 7,
     /// LP position not found for the given key
     LpPositionNotFound = 8,
+    /// Market must be Resolved before it can be archived
+    MarketNotResolved = 20,
+    /// Market has already been archived
+    MarketAlreadyArchived = 21,
 
 }
 
@@ -262,7 +266,13 @@ pub mod events {
         pub admin: Address,
         pub old_bond: i128,
         pub new_bond: i128,
+    }
 
+    #[contractevent]
+    pub struct MarketArchived {
+        pub market_id: u64,
+        pub archived_by: Address,
+        pub timestamp: u64,
     }
 
 }

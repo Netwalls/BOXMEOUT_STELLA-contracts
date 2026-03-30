@@ -16,6 +16,7 @@ pub mod prediction_market;
 
 pub mod helpers;
 pub mod math;
+pub mod storage;
 
 // Feature-gated exports for WASM builds
 #[cfg(feature = "market")]
