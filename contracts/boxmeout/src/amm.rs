@@ -1169,10 +1169,41 @@ impl AMM {
         (yes_price, no_price)
     }
 
-    // TODO: Implement remaining AMM functions
-    // - get_lp_position() / claim_lp_fees()
-    // - calculate_spot_price()
-    // - get_trade_history()
+    /// CPMM spot price for a given outcome index (0 = NO, 1 = YES).
+    ///
+    /// Returns the outcome's reserve divided by the total pool, expressed in
+    /// fixed-point with 7-decimal precision (scale = 10_000_000).
+    ///
+    /// - Returns 0 if the pool is not initialised or has zero liquidity.
+    /// - For a binary pool with equal reserves the two prices each equal
+    ///   5_000_000 (0.5000000) and their sum is exactly 10_000_000 (1.0).
+    pub fn calc_spot_price(env: Env, market_id: BytesN<32>, outcome: u32) -> u128 {
+        const SCALE: u128 = 10_000_000;
+
+        let pool_exists_key = (Symbol::new(&env, POOL_EXISTS_KEY), market_id.clone());
+        if !env.storage().persistent().has(&pool_exists_key) {
+            return 0;
+        }
+
+        let yes_reserve: u128 = env
+            .storage()
+            .persistent()
+            .get(&(Symbol::new(&env, POOL_YES_RESERVE_KEY), market_id.clone()))
+            .unwrap_or(0);
+        let no_reserve: u128 = env
+            .storage()
+            .persistent()
+            .get(&(Symbol::new(&env, POOL_NO_RESERVE_KEY), market_id.clone()))
+            .unwrap_or(0);
+
+        let total = yes_reserve + no_reserve;
+        if total == 0 {
+            return 0;
+        }
+
+        let reserve = if outcome == 1 { yes_reserve } else { no_reserve };
+        crate::math::mul_div(reserve as i128, SCALE as i128, total as i128) as u128
+    }
 
     /// Calculate LP shares to mint for a new collateral deposit.
     ///
@@ -1518,4 +1549,50 @@ mod tests {
         let price_bps = (reserve * 10_000) / total; // basis points
         assert_eq!(price_bps, 5_000, "price must be 50% (5000 bps)");
     }
-}
+
+    // ── calc_spot_price ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_calc_spot_price_uninitialized_pool_returns_zero() {
+        let env = Env::default();
+        let amm_id = env.register(AMM, ());
+        let amm = AMMClient::new(&env, &amm_id);
+        let market_id = BytesN::from_array(&env, &[99u8; 32]);
+        assert_eq!(amm.calc_spot_price(&market_id, &0u32), 0);
+        assert_eq!(amm.calc_spot_price(&market_id, &1u32), 0);
+    }
+
+    #[test]
+    fn test_calc_spot_price_equal_reserves_binary() {
+        // Equal reserves → each outcome price = 0.5000000 (5_000_000 / 10_000_000).
+        let env = Env::default();
+        let (amm, _usdc, _lp, _admin, market_id) = setup_amm_pool(&env);
+
+        let price_no = amm.calc_spot_price(&market_id, &0u32);
+        let price_yes = amm.calc_spot_price(&market_id, &1u32);
+
+        assert_eq!(price_no, 5_000_000, "NO price must be 0.5 (5_000_000)");
+        assert_eq!(price_yes, 5_000_000, "YES price must be 0.5 (5_000_000)");
+        assert_eq!(price_no + price_yes, 10_000_000, "prices must sum to 1.0");
+    }
+
+    #[test]
+    fn test_calc_spot_price_sum_equals_one_after_trade() {
+        // After a buy the prices shift but must still sum to 1.0 (within rounding).
+        let env = Env::default();
+        let (amm, usdc, _lp, _admin, market_id) = setup_amm_pool(&env);
+
+        let buyer = Address::generate(&env);
+        usdc.mint(&buyer, &100_000i128);
+        amm.buy_shares(&buyer, &market_id, &1u32, &100_000u128, &0u128);
+
+        let price_no = amm.calc_spot_price(&market_id, &0u32);
+        let price_yes = amm.calc_spot_price(&market_id, &1u32);
+        let sum = price_no + price_yes;
+
+        // Allow ±1 rounding error.
+        assert!(
+            sum == 10_000_000 || sum == 9_999_999 || sum == 10_000_001,
+            "prices must sum to ~1.0, got {sum}"
+        );
+    }
