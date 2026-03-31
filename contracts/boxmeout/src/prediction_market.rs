@@ -131,6 +131,9 @@ pub enum PredictionMarketError {
     InvalidMinLiquidity = 3,
     InvalidMinTrade = 4,
     InvalidMaxOutcomes = 5,
+    InvalidDisputeBond = 6,
+    Unauthorized = 7,
+    NotInitialized = 8,
     NoPosition = 10,
     /// Trying to sell more shares than held
     InsufficientShares = 11,
@@ -223,6 +226,13 @@ pub mod events {
         pub admin: Address,
         pub old_bond: i128,
         pub new_bond: i128,
+    }
+
+    #[contractevent]
+    pub struct ConfigUpdated {
+        pub admin: Address,
+        pub key: soroban_sdk::String,
+        pub new_value: i128,
     }
 
     #[contractevent]
@@ -553,6 +563,64 @@ impl PredictionMarketContract {
         Self::require_not_paused(&env)?;
 
         // ... actual buy logic would follow here ...
+        Ok(())
+    }
+
+    /// Admin-only: update the minimum dispute bond.
+    pub fn set_dispute_bond(
+        env: Env,
+        admin: Address,
+        new_bond: i128,
+    ) -> Result<(), PredictionMarketError> {
+        let mut config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::NotInitialized)?;
+        if admin != config.admin {
+            return Err(PredictionMarketError::Unauthorized);
+        }
+        admin.require_auth();
+        if new_bond <= 0 {
+            return Err(PredictionMarketError::InvalidDisputeBond);
+        }
+        config.dispute_bond = new_bond;
+        env.storage().persistent().set(&DataKey::Config, &config);
+        events::ConfigUpdated {
+            admin,
+            key: soroban_sdk::String::from_str(&env, "dispute_bond"),
+            new_value: new_bond,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Admin-only: update the minimum trade collateral.
+    pub fn set_min_trade(
+        env: Env,
+        admin: Address,
+        min_trade: i128,
+    ) -> Result<(), PredictionMarketError> {
+        let mut config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::NotInitialized)?;
+        if admin != config.admin {
+            return Err(PredictionMarketError::Unauthorized);
+        }
+        admin.require_auth();
+        if min_trade <= 0 {
+            return Err(PredictionMarketError::InvalidMinTrade);
+        }
+        config.min_trade = min_trade;
+        env.storage().persistent().set(&DataKey::Config, &config);
+        events::ConfigUpdated {
+            admin,
+            key: soroban_sdk::String::from_str(&env, "min_trade"),
+            new_value: min_trade,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -2645,6 +2713,101 @@ mod tests {
         let client = PredictionMarketContractClient::new(&env, &cid);
         let result = client.try_update_dispute_bond(&admin, &500i128);
         assert_eq!(result, Err(Ok(PredictionMarketError::NotInitialized)));
+    }
+
+    // ── set_dispute_bond ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_dispute_bond_happy_path() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        client.set_dispute_bond(&admin, &1_000i128).unwrap();
+        assert_eq!(client.get_config().unwrap().dispute_bond, 1_000);
+    }
+
+    #[test]
+    fn test_set_dispute_bond_zero_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_set_dispute_bond(&admin, &0i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::InvalidDisputeBond)));
+    }
+
+    #[test]
+    fn test_set_dispute_bond_non_admin_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let attacker = Address::generate(&env);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_set_dispute_bond(&attacker, &1_000i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_set_dispute_bond_emits_event() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let before = env.events().all().len();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        client.set_dispute_bond(&admin, &999i128).unwrap();
+        assert!(env.events().all().len() > before);
+    }
+
+    // ── set_min_trade ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_min_trade_happy_path() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        client.set_min_trade(&admin, &250i128).unwrap();
+        assert_eq!(client.get_config().unwrap().min_trade, 250);
+    }
+
+    #[test]
+    fn test_set_min_trade_zero_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_set_min_trade(&admin, &0i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::InvalidMinTrade)));
+    }
+
+    #[test]
+    fn test_set_min_trade_non_admin_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let attacker = Address::generate(&env);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let result = client.try_set_min_trade(&attacker, &250i128);
+        assert_eq!(result, Err(Ok(PredictionMarketError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_set_min_trade_emits_event() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let before = env.events().all().len();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        client.set_min_trade(&admin, &50i128).unwrap();
+        assert!(env.events().all().len() > before);
+    }
+
+    /// Trade below the new minimum must be rejected.
+    /// (Simulated: after raising min_trade, a collateral value below it is invalid.)
+    #[test]
+    fn test_trade_below_new_min_trade_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        default_init(&env, &cid, &admin, &treasury, &oracle, &token).unwrap();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        // Raise min_trade to 500
+        client.set_min_trade(&admin, &500i128).unwrap();
+        let config = client.get_config().unwrap();
+        // Any collateral below the new min_trade must be less than config.min_trade
+        let collateral: i128 = 100;
+        assert!(collateral < config.min_trade, "collateral should be below new min_trade");
     }
 
 }

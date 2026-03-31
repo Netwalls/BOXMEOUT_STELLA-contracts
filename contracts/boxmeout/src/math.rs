@@ -132,6 +132,21 @@ pub fn split_fees(
     (protocol, lp, creator)
 }
 
+/// Compound fee deduction over `n` hops: `(1 - fee_bps / 10_000) ^ n` in BPS.
+///
+/// Returns a value in the range `[0, 10_000]` where `10_000` represents 1.0.
+/// - `n == 0` → `10_000` (identity).
+/// - Monotonically decreasing with `n` for any `fee_bps > 0`.
+/// - No overflow for `n <= 100` and `fee_bps <= 500`.
+pub fn pow_bps(fee_bps: u32, n: u32) -> i128 {
+    let mut result: i128 = 10_000;
+    let factor: i128 = 10_000 - fee_bps as i128;
+    for _ in 0..n {
+        result = result * factor / 10_000;
+    }
+    result
+}
+
 // ── internal helpers ────────────────────────────────────────────────────────
 
 /// Multiply two u128 values, returning (lo, hi) of the 256-bit product.
@@ -415,6 +430,36 @@ mod tests {
     #[should_panic(expected = "total_fee must be non-negative")]
     fn test_split_fees_negative_total_panics() {
         split_fees(-1, 100, 100, 100);
+    }
+
+    // ── pow_bps ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pow_bps_identity() {
+        assert_eq!(pow_bps(200, 0), 10_000);
+    }
+
+    #[test]
+    fn test_pow_bps_acceptance() {
+        assert_eq!(pow_bps(200, 1), 9_800);
+        assert_eq!(pow_bps(200, 2), 9_604);
+    }
+
+    #[test]
+    fn test_pow_bps_monotone_decreasing() {
+        let mut prev = pow_bps(200, 0);
+        for n in 1..=100 {
+            let cur = pow_bps(200, n);
+            assert!(cur < prev, "not decreasing at n={n}");
+            prev = cur;
+        }
+    }
+
+    #[test]
+    fn test_pow_bps_no_overflow_max_params() {
+        // n=100, fee_bps=500 must not panic or overflow
+        let result = pow_bps(500, 100);
+        assert!(result >= 0);
     }
 
     // ── fuzz: 10 000 random (a, b, d) triples ────────────────────────────────
