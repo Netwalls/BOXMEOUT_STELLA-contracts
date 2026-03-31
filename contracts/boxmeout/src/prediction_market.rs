@@ -76,6 +76,8 @@ pub struct Market {
     pub created_at: u64,
     pub closed_at: Option<u64>,
     pub num_outcomes: u32,
+    pub question: soroban_sdk::Symbol,
+    pub description: soroban_sdk::Symbol,
 }
 
 // Market state constants
@@ -183,6 +185,10 @@ pub struct TradeReceipt {
     MarketNotFound = 12,
     /// Market is already closed or in a terminal state
     InvalidMarketStatus = 13,
+    /// new_max_outcomes is out of the allowed range [2, 64]
+    InvalidMaxOutcomes = 14,
+    /// Caller is neither admin nor market creator
+    NotCreatorOrAdmin = 15,
 
 
 
@@ -237,6 +243,18 @@ pub mod events {
         pub market_id: u64,
         pub closed_by: Address,
         pub timestamp: u64,
+
+    #[contractevent]
+    pub struct ConfigUpdated {
+        pub field: soroban_sdk::Symbol,
+        pub new_value: u32,
+    }
+
+    #[contractevent]
+    pub struct MarketMetadataUpdated {
+        pub market_id: u64,
+        pub updated_by: Address,
+    }
 
     #[contractevent]
     pub struct SharesSold {
@@ -838,6 +856,96 @@ mod tests {
             market_id,
             closed_by: caller,
             timestamp: now,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Admin-only: update the global cap on the maximum number of outcomes per market.
+    ///
+    /// - Requires admin auth.
+    /// - Validates `new_max >= 2 && new_max <= 64`.
+    /// - Updates `Config.max_outcomes` and persists atomically.
+    /// - Emits `events::ConfigUpdated("max_outcomes", new_max)`.
+    pub fn set_max_outcomes(
+        env: Env,
+        admin: Address,
+        new_max: u32,
+    ) -> Result<(), PredictionMarketError> {
+        Self::require_not_paused(&env)?;
+        let mut config = Self::require_admin(&env, &admin)?;
+
+        if new_max < 2 || new_max > 64 {
+            return Err(PredictionMarketError::InvalidMaxOutcomes);
+        }
+
+        config.max_outcomes = new_max;
+        env.storage().persistent().set(&DataKey::Config, &config);
+
+        events::ConfigUpdated {
+            field: soroban_sdk::Symbol::new(&env, "max_outcomes"),
+            new_value: new_max,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Admin or market creator: correct the question and/or description of a market
+    /// before it has received its first trade (Open or Paused state).
+    ///
+    /// - Requires admin or market creator auth.
+    /// - Market must be in `Open` or `Paused` state; terminal states are rejected.
+    /// - Updates `market.question` and/or `market.description` when `Some` is provided.
+    /// - Emits `events::MarketMetadataUpdated(market_id, caller)`.
+    pub fn update_market_metadata(
+        env: Env,
+        caller: Address,
+        market_id: u64,
+        new_question: Option<soroban_sdk::Symbol>,
+        new_description: Option<soroban_sdk::Symbol>,
+    ) -> Result<(), PredictionMarketError> {
+        Self::require_not_paused(&env)?;
+
+        let config: Config = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(PredictionMarketError::NotInitialized)?;
+
+        let mut market: Market = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Market(market_id))
+            .ok_or(PredictionMarketError::MarketNotFound)?;
+
+        let is_admin = caller == config.admin;
+        let is_creator = caller == market.creator;
+        if !is_admin && !is_creator {
+            return Err(PredictionMarketError::NotCreatorOrAdmin);
+        }
+        caller.require_auth();
+
+        match market.status {
+            MarketStatus::Open | MarketStatus::Paused => {}
+            _ => return Err(PredictionMarketError::InvalidMarketStatus),
+        }
+
+        if let Some(q) = new_question {
+            market.question = q;
+        }
+        if let Some(d) = new_description {
+            market.description = d;
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Market(market_id), &market);
+
+        events::MarketMetadataUpdated {
+            market_id,
+            updated_by: caller,
         }
         .publish(&env);
 
@@ -2539,6 +2647,229 @@ mod tests {
         assert_eq!(result, Err(Ok(PredictionMarketError::NotInitialized)));
     }
 
+}
+
+// ---------------------------------------------------------------------------
+// set_max_outcomes unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod set_max_outcomes_tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Env};
+
+    fn setup() -> (Env, Address, Address, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let token = Address::generate(&env);
+        let cid = env.register(PredictionMarketContract, ());
+        (env, cid, admin, treasury, oracle, token)
+    }
+
+    fn init(env: &Env, cid: &Address, admin: &Address, treasury: &Address, oracle: &Address, token: &Address) {
+        PredictionMarketContractClient::new(env, cid)
+            .try_initialize(admin, treasury, oracle, token, &200u32, &100u32, &1_000i128, &100i128, &4u32, &500i128)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_set_max_outcomes_success() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        init(&env, &cid, &admin, &treasury, &oracle, &token);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(client.try_set_max_outcomes(&admin, &8u32).is_ok());
+        assert_eq!(client.get_config().unwrap().max_outcomes, 8);
+    }
+
+    #[test]
+    fn test_set_max_outcomes_boundary_2_accepted() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        init(&env, &cid, &admin, &treasury, &oracle, &token);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(client.try_set_max_outcomes(&admin, &2u32).is_ok());
+    }
+
+    #[test]
+    fn test_set_max_outcomes_boundary_64_accepted() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        init(&env, &cid, &admin, &treasury, &oracle, &token);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert!(client.try_set_max_outcomes(&admin, &64u32).is_ok());
+    }
+
+    #[test]
+    fn test_set_max_outcomes_1_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        init(&env, &cid, &admin, &treasury, &oracle, &token);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert_eq!(
+            client.try_set_max_outcomes(&admin, &1u32),
+            Err(Ok(PredictionMarketError::InvalidMaxOutcomes))
+        );
+    }
+
+    #[test]
+    fn test_set_max_outcomes_65_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        init(&env, &cid, &admin, &treasury, &oracle, &token);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert_eq!(
+            client.try_set_max_outcomes(&admin, &65u32),
+            Err(Ok(PredictionMarketError::InvalidMaxOutcomes))
+        );
+    }
+
+    #[test]
+    fn test_set_max_outcomes_non_admin_rejected() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        init(&env, &cid, &admin, &treasury, &oracle, &token);
+        let attacker = Address::generate(&env);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert_eq!(
+            client.try_set_max_outcomes(&attacker, &8u32),
+            Err(Ok(PredictionMarketError::Unauthorized))
+        );
+    }
+
+    #[test]
+    fn test_set_max_outcomes_emits_event() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        init(&env, &cid, &admin, &treasury, &oracle, &token);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let before = env.events().all().len();
+        client.try_set_max_outcomes(&admin, &16u32).unwrap();
+        assert!(env.events().all().len() > before);
+    }
+
+    #[test]
+    fn test_set_max_outcomes_preserves_other_config_fields() {
+        let (env, cid, admin, treasury, oracle, token) = setup();
+        init(&env, &cid, &admin, &treasury, &oracle, &token);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        client.try_set_max_outcomes(&admin, &32u32).unwrap();
+        let cfg = client.get_config().unwrap();
+        assert_eq!(cfg.protocol_fee_bps, 200);
+        assert_eq!(cfg.dispute_bond, 500);
+        assert_eq!(cfg.max_outcomes, 32);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// update_market_metadata unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod update_market_metadata_tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Env, Symbol};
+
+    fn setup_with_market() -> (Env, Address, Address, Address, u64) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let token = Address::generate(&env);
+        let cid = env.register(PredictionMarketContract, ());
+
+        PredictionMarketContractClient::new(&env, &cid)
+            .try_initialize(&admin, &treasury, &oracle, &token, &200u32, &100u32, &1_000i128, &100i128, &4u32, &500i128)
+            .unwrap();
+
+        let creator = Address::generate(&env);
+        let market_id = 1u64;
+        let market = Market {
+            market_id,
+            creator: creator.clone(),
+            status: MarketStatus::Open,
+            created_at: env.ledger().timestamp(),
+            closed_at: None,
+            num_outcomes: 2,
+            question: Symbol::new(&env, "WhoWins"),
+            description: Symbol::new(&env, "MatchDesc"),
+        };
+        env.as_contract(&cid, || {
+            env.storage().persistent().set(&DataKey::Market(market_id), &market);
+        });
+
+        (env, cid, admin, creator, market_id)
+    }
+
+    #[test]
+    fn test_admin_can_update_metadata() {
+        let (env, cid, admin, _creator, market_id) = setup_with_market();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let new_q = Symbol::new(&env, "NewQuestion");
+        assert!(client
+            .try_update_market_metadata(&admin, &market_id, &Some(new_q.clone()), &None)
+            .is_ok());
+        let market: Market = env.as_contract(&cid, || {
+            env.storage().persistent().get(&DataKey::Market(market_id)).unwrap()
+        });
+        assert_eq!(market.question, new_q);
+    }
+
+    #[test]
+    fn test_creator_can_update_metadata() {
+        let (env, cid, _admin, creator, market_id) = setup_with_market();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let new_d = Symbol::new(&env, "NewDesc");
+        assert!(client
+            .try_update_market_metadata(&creator, &market_id, &None, &Some(new_d.clone()))
+            .is_ok());
+        let market: Market = env.as_contract(&cid, || {
+            env.storage().persistent().get(&DataKey::Market(market_id)).unwrap()
+        });
+        assert_eq!(market.description, new_d);
+    }
+
+    #[test]
+    fn test_non_creator_non_admin_rejected() {
+        let (env, cid, _admin, _creator, market_id) = setup_with_market();
+        let stranger = Address::generate(&env);
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert_eq!(
+            client.try_update_market_metadata(&stranger, &market_id, &None, &None),
+            Err(Ok(PredictionMarketError::NotCreatorOrAdmin))
+        );
+    }
+
+    #[test]
+    fn test_update_on_closed_market_rejected() {
+        let (env, cid, admin, _creator, market_id) = setup_with_market();
+        env.as_contract(&cid, || {
+            let mut m: Market = env.storage().persistent().get(&DataKey::Market(market_id)).unwrap();
+            m.status = MarketStatus::Closed;
+            env.storage().persistent().set(&DataKey::Market(market_id), &m);
+        });
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert_eq!(
+            client.try_update_market_metadata(&admin, &market_id, &None, &None),
+            Err(Ok(PredictionMarketError::InvalidMarketStatus))
+        );
+    }
+
+    #[test]
+    fn test_update_emits_event() {
+        let (env, cid, admin, _creator, market_id) = setup_with_market();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        let before = env.events().all().len();
+        client.try_update_market_metadata(&admin, &market_id, &None, &None).unwrap();
+        assert!(env.events().all().len() > before);
+    }
+
+    #[test]
+    fn test_market_not_found_rejected() {
+        let (env, cid, admin, _creator, _market_id) = setup_with_market();
+        let client = PredictionMarketContractClient::new(&env, &cid);
+        assert_eq!(
+            client.try_update_market_metadata(&admin, &999u64, &None, &None),
+            Err(Ok(PredictionMarketError::MarketNotFound))
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
