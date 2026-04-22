@@ -58,4 +58,6 @@ pub enum ContractError {
     FactoryPaused = 50,
     /// Oracle address already in whitelist
     OracleAlreadyWhitelisted = 51,
+    /// Vec of market IDs exceeds the maximum allowed (20)
+    TooManyMarkets = 52,
 }

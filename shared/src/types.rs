@@ -137,6 +137,16 @@ pub struct OracleReport {
     pub oracle_address: Address,
 }
 
+/// A non-zero, non-redeemed position held by a user in a specific market.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UserPosition {
+    pub market_id: u64,
+    pub side: BetSide,
+    /// Total unclaimed stake on this side in this market (stroops)
+    pub amount: i128,
+}
+
 /// Receipt returned to the bettor after a successful claim.
 #[contracttype]
 #[derive(Clone, Debug)]

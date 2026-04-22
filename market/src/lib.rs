@@ -22,7 +22,7 @@ use boxmeout_shared::{
     errors::ContractError,
     types::{
         BetRecord, BetSide, ClaimReceipt, FightDetails, MarketConfig,
-        MarketState, Outcome, OracleReport,
+        MarketState, Outcome, OracleReport, UserPosition,
     },
 };
 
