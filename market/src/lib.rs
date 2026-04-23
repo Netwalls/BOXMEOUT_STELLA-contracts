@@ -1,20 +1,6 @@
+#![no_std]
 /// ============================================================
 /// BOXMEOUT — Market Contract
-///
-/// One instance deployed per boxing match.
-/// Responsibilities:
-///   - Accept bets from users
-///   - Lock betting at the correct time
-///   - Receive and verify oracle resolution
-///   - Pay out winners proportionally
-///   - Refund all bettors if cancelled
-///   - Handle admin dispute / override flow
-///
-/// Contributors: implement every function marked todo!()
-/// DO NOT change function signatures.
-/// ============================================================
-
-#![no_std]
 
 use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
 
