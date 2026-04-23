@@ -1,17 +1,6 @@
+#![no_std]
 /// ============================================================
 /// BOXMEOUT — Treasury Contract
-///
-/// Responsibilities:
-///   - Collect platform fees from resolved markets
-///   - Enforce daily withdrawal limits
-///   - Restrict fee deposits to approved market contracts only
-///   - Emergency drain in case of compromise
-///
-/// Contributors: implement every function marked todo!()
-/// DO NOT change function signatures.
-/// ============================================================
-
-#![no_std]
 
 use soroban_sdk::{contract, contractimpl, Address, Env, Map};
 

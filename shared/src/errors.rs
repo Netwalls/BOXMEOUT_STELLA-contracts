@@ -7,7 +7,7 @@
 use soroban_sdk::contracterror;
 
 #[contracterror]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum ContractError {
     // ── Authorization ──────────────────────────────────────
     /// Caller is not the contract admin

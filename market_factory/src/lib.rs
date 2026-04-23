@@ -1,17 +1,6 @@
+#![no_std]
 /// ============================================================
 /// BOXMEOUT — MarketFactory Contract
-///
-/// Responsibilities:
-///   - Deploy and register new Market contracts
-///   - Maintain the oracle whitelist
-///   - Gate market creation (pause / unpause)
-///   - Transfer admin rights
-///
-/// Contributors: implement every function marked todo!()
-/// DO NOT change function signatures.
-/// ============================================================
-
-#![no_std]
 
 use soroban_sdk::{contract, contractimpl, contractclient, Address, Env, Vec};
 
