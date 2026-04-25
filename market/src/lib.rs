@@ -33,6 +33,8 @@ const TREASURY: &str     = "TREASURY";
 const CLAIMING: &str     = "CLAIMING";
 /// Emergency pause — when true all fund-moving operations are blocked
 const PAUSED: &str       = "PAUSED";
+/// Pending oracle reports for 2-of-3 consensus
+const PENDING_REPORTS: &str = "PENDING_REPORTS";
 
 // ─── Cross-contract client for oracle whitelist check ─────────────────────────
 #[contractclient(name = "FactoryClient")]
@@ -251,7 +253,7 @@ impl Market {
     }
 
     // =========================================================================
-    // RESOLVE MARKET
+    // RESOLVE MARKET — 2-of-3 Oracle Consensus
     // =========================================================================
     pub fn resolve_market(
         env: Env,
@@ -281,7 +283,7 @@ impl Market {
             return Err(ContractError::InvalidOracleSignature);
         }
 
-        // Verify Ed25519 signature over (match_id_bytes || outcome_byte || reported_at_be)
+        // Verify Ed25519 signature
         {
             use soroban_sdk::Bytes;
             let match_id_bytes = report.match_id.to_bytes();
@@ -300,11 +302,7 @@ impl Market {
                 msg.push_back(*b);
             }
 
-            // oracle_address raw bytes are the 32-byte Ed25519 public key on Stellar
             let pub_key_bytes = oracle.to_string().to_bytes();
-            // Use env.crypto().ed25519_verify — panics (traps) on invalid sig
-            // We catch via a guard: if the address bytes aren't 32 bytes we reject early.
-            // Soroban's ed25519_verify traps on failure; wrap in a check.
             env.crypto().ed25519_verify(
                 &soroban_sdk::BytesN::try_from_array(&env, &{
                     let mut arr = [0u8; 32];
@@ -319,14 +317,54 @@ impl Market {
             );
         }
 
-        // EFFECTS
-        state.outcome = Some(report.outcome.clone());
-        state.status = MarketStatus::Resolved;
-        state.resolved_at = Some(env.ledger().timestamp());
-        state.oracle_used = Some(OracleRole::Primary);
-        Self::save_state(&env, &state);
+        // EFFECTS — 2-of-3 consensus logic
+        let mut pending: Map<Address, OracleReport> =
+            env.storage().persistent().get(&PENDING_REPORTS).unwrap_or_else(|| Map::new(&env));
 
-        boxmeout_shared::emit_market_resolved(&env, state.market_id, report.outcome, oracle);
+        // Check if we already have a report from this oracle
+        if pending.contains_key(oracle.clone()) {
+            return Err(ContractError::Unauthorized);
+        }
+
+        // Store this report
+        pending.set(oracle.clone(), report.clone());
+        env.storage().persistent().set(&PENDING_REPORTS, &pending);
+
+        // Count matching and conflicting reports
+        let mut matching_count = 1u32;
+        let mut conflicting_count = 0u32;
+        let mut third_oracle: Option<Address> = None;
+
+        for (stored_oracle, stored_report) in pending.iter() {
+            if stored_oracle != oracle {
+                if stored_report.outcome == report.outcome {
+                    matching_count += 1;
+                } else {
+                    conflicting_count += 1;
+                    if third_oracle.is_none() {
+                        third_oracle = Some(stored_oracle);
+                    }
+                }
+            }
+        }
+
+        // Resolve if we have 2 matching reports
+        if matching_count >= 2 {
+            state.outcome = Some(report.outcome.clone());
+            state.status = MarketStatus::Resolved;
+            state.resolved_at = Some(env.ledger().timestamp());
+            state.oracle_used = Some(OracleRole::Primary);
+            Self::save_state(&env, &state);
+            
+            // Clear pending reports
+            env.storage().persistent().set(&PENDING_REPORTS, &Map::<Address, OracleReport>::new(&env));
+            
+            boxmeout_shared::emit_market_resolved(&env, state.market_id, report.outcome, oracle);
+        } else if conflicting_count > 0 && matching_count == 1 {
+            // Emit event for conflicting report, wait for third oracle
+            boxmeout_shared::emit_conflicting_oracle_report(&env, state.market_id, oracle);
+        }
+
         Ok(())
     }
 
