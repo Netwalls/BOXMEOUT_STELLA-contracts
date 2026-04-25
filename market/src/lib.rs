@@ -34,6 +34,10 @@ const CLAIMING: &str     = "CLAIMING";
 /// Emergency pause — when true all fund-moving operations are blocked
 const PAUSED: &str       = "PAUSED";
 
+// ─── Storage TTL Constants ────────────────────────────────────────────────────
+/// Maximum TTL for market data (30 days in ledger entries)
+const MAX_TTL: u32 = 2_592_000;
+
 // ─── Cross-contract client for oracle whitelist check ─────────────────────────
 #[contractclient(name = "FactoryClient")]
 pub trait FactoryInterface {
@@ -91,6 +95,13 @@ impl Market {
         let oracles = client.get_oracles();
         oracles.contains(caller.clone())
     }
+
+    /// Extend TTL on market data entries to prevent premature expiration.
+    fn extend_market_ttl(env: &Env) {
+        env.storage().persistent().extend_ttl(&STATE, MAX_TTL, MAX_TTL);
+        env.storage().persistent().extend_ttl(&BETS, MAX_TTL, MAX_TTL);
+        env.storage().persistent().extend_ttl(&BETTOR_LIST, MAX_TTL, MAX_TTL);
+    }
 }
 
 #[contractimpl]
@@ -137,6 +148,9 @@ impl Market {
         env.storage().persistent().set(&BETTOR_LIST, &Vec::<Address>::new(&env));
         env.storage().instance().set(&PAUSED, &false);
         env.storage().instance().set(&CLAIMING, &false);
+
+        // Set TTL on market data entries
+        Self::extend_market_ttl(&env);
 
         Ok(())
     }
@@ -209,6 +223,9 @@ impl Market {
             bettor_list.push_back(bettor.clone());
             env.storage().persistent().set(&BETTOR_LIST, &bettor_list);
         }
+
+        // Extend TTL on each bet to keep market active
+        Self::extend_market_ttl(&env);
 
         // ── INTERACTIONS ──────────────────────────────────────────────────────
         let token_client = token::Client::new(&env, &token);
