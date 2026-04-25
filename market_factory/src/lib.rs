@@ -139,7 +139,11 @@ impl MarketFactory {
             .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]));
 
         // Deploy new market using the stored wasm hash
-        let market_address = if wasm_hash != BytesN::from_array(&env, &[0u8; 32]) {
+        // Check if wasm hash is set (not all zeros)
+        let hash_bytes = wasm_hash.to_vec();
+        let is_hash_set = hash_bytes.iter().any(|&b| b != 0);
+        
+        let market_address = if is_hash_set {
             env.deployer().with_address(env.current_contract_address(), wasm_hash).deploy(env.current_contract_address())
         } else {
             // Fallback: use factory address as placeholder if wasm hash not set
