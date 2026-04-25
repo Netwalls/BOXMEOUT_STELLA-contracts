@@ -262,3 +262,62 @@ impl Treasury {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use soroban_sdk::{
+        testutils::Address as _,
+        Address, Env,
+    };
+
+    use super::{Treasury, TreasuryClient};
+
+    fn setup() -> (Env, TreasuryClient<'static>, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, Treasury);
+        let client = TreasuryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let market = Address::generate(&env);
+        client.initialize(&admin, &1_000_000_i128);
+        (env, client, admin, market)
+    }
+
+    #[test]
+    fn approve_market_is_idempotent() {
+        let (_env, client, admin, market) = setup();
+        client.approve_market(&admin, &market);
+        // second call must not panic
+        client.approve_market(&admin, &market);
+    }
+
+    #[test]
+    fn revoke_market_removes_approval() {
+        let (env, client, admin, market) = setup();
+        let token = Address::generate(&env);
+
+        client.approve_market(&admin, &market);
+        client.revoke_market(&admin, &market);
+
+        // deposit_fees should now return MarketNotApproved
+        let result = client.try_deposit_fees(&market, &token, &100_i128);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[should_panic]
+    fn approve_market_requires_admin() {
+        let (env, client, _admin, market) = setup();
+        let non_admin = Address::generate(&env);
+        client.approve_market(&non_admin, &market);
+    }
+
+    #[test]
+    #[should_panic]
+    fn revoke_market_requires_admin() {
+        let (env, client, admin, market) = setup();
+        let non_admin = Address::generate(&env);
+        client.approve_market(&admin, &market);
+        client.revoke_market(&non_admin, &market);
+    }
+}
