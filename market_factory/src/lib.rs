@@ -3,7 +3,7 @@
 /// BOXMEOUT — MarketFactory Contract (Security-Audited)
 /// ============================================================
 
-use soroban_sdk::{contract, contractimpl, contractclient, Address, Env, Vec, Map};
+use soroban_sdk::{contract, contractimpl, contractclient, Address, Env, Vec, Map, BytesN};
 
 use boxmeout_shared::{
     errors::ContractError,
@@ -16,6 +16,7 @@ const ADMIN: &str           = "ADMIN";
 const ORACLE_WHITELIST: &str = "ORACLE_WHITELIST";
 const PAUSED: &str          = "PAUSED";
 const DEFAULT_CONFIG: &str  = "DEFAULT_CONFIG";
+const MARKET_WASM_HASH: &str = "MARKET_WASM_HASH";
 
 #[contractclient(name = "MarketClient")]
 pub trait MarketInterface {
@@ -71,6 +72,23 @@ impl MarketFactory {
             resolution_window: 86400,    // 24 hours
         };
         env.storage().persistent().set(&DEFAULT_CONFIG, &default_config);
+        
+        // Initialize with zero hash; admin must call update_market_wasm to set it
+        let zero_hash: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
+        env.storage().persistent().set(&MARKET_WASM_HASH, &zero_hash);
+        Ok(())
+    }
+
+    /// Updates the Market wasm hash used for new deployments.
+    /// Only admin can call this. Existing markets are unaffected.
+    pub fn update_market_wasm(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().persistent().set(&MARKET_WASM_HASH, &new_wasm_hash);
         Ok(())
     }
 
@@ -101,11 +119,18 @@ impl MarketFactory {
         let market_id: u64 = env.storage().persistent().get(&MARKET_COUNT).unwrap_or(0);
         let new_count = market_id + 1;
 
-        // NOTE: actual wasm deployment requires the wasm hash to be stored.
-        // This stub records the factory address as a placeholder until the
-        // wasm hash upgrade mechanism (Issue #37) is implemented.
-        // In production, replace with env.deployer().with_wasm_hash(...).deploy(...)
-        let market_address = env.current_contract_address(); // placeholder
+        // Read the wasm hash dynamically from storage
+        let wasm_hash: BytesN<32> = env.storage().persistent()
+            .get(&MARKET_WASM_HASH)
+            .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]));
+
+        // Deploy new market using the stored wasm hash
+        let market_address = if wasm_hash != BytesN::from_array(&env, &[0u8; 32]) {
+            env.deployer().with_address(env.current_contract_address(), wasm_hash).deploy(env.current_contract_address())
+        } else {
+            // Fallback: use factory address as placeholder if wasm hash not set
+            env.current_contract_address()
+        };
 
         let mut market_map: Map<u64, Address> =
             env.storage().persistent().get(&MARKET_MAP).unwrap_or_else(|| Map::new(&env));
