@@ -713,7 +713,7 @@ impl Market {
     // =========================================================================
 
     /// Returns the current state of the market.
-    pub fn get_state(env: Env) -> MarketState {
+    pub fn get_state(env: Env) -> Result<MarketState, ContractError> {
         Self::load_state(&env)
     }
 

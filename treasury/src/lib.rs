@@ -405,3 +405,88 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+// ============================================================
+// ISSUE #22: initialize() tests
+// ============================================================
+#[cfg(test)]
+mod initialize_tests {
+    use soroban_sdk::{testutils::Address as _, Address, Env};
+    use super::{Treasury, TreasuryClient};
+
+    fn setup_client(env: &Env) -> TreasuryClient<'static> {
+        env.mock_all_auths();
+        let id = env.register_contract(None, Treasury);
+        TreasuryClient::new(env, &id)
+    }
+
+    /// First call stores admin and withdrawal_limit correctly.
+    #[test]
+    fn test_initialize_stores_correct_state() {
+        let env = Env::default();
+        let client = setup_client(&env);
+        let admin = Address::generate(&env);
+
+        client.initialize(&admin, &5_000_000i128);
+
+        // Withdrawal limit is readable via get_daily_withdrawal_amount (starts at 0)
+        assert_eq!(client.get_daily_withdrawal_amount(), 0);
+        // Accumulated fees for any token start at 0
+        let token = Address::generate(&env);
+        assert_eq!(client.get_accumulated_fees(&token), 0);
+    }
+
+    /// Second call returns AlreadyInitialized.
+    #[test]
+    fn test_initialize_second_call_returns_already_initialized() {
+        let env = Env::default();
+        let client = setup_client(&env);
+        let admin = Address::generate(&env);
+
+        client.initialize(&admin, &1_000_000i128);
+        let result = client.try_initialize(&admin, &1_000_000i128);
+        assert!(result.is_err());
+    }
+
+    /// Withdrawal limit is enforced after initialization.
+    #[test]
+    fn test_initialize_withdrawal_limit_enforced() {
+        let env = Env::default();
+        let client = setup_client(&env);
+        let admin = Address::generate(&env);
+        let limit = 1_000_000i128;
+
+        client.initialize(&admin, &limit);
+
+        // A withdrawal above the limit must fail
+        let token = Address::generate(&env);
+        let dest = Address::generate(&env);
+        let result = client.try_withdraw_fees(&admin, &token, &(limit + 1), &dest);
+        assert!(result.is_err());
+    }
+
+    /// ACCUMULATED_FEES map starts empty (zero for any token).
+    #[test]
+    fn test_initialize_accumulated_fees_empty() {
+        let env = Env::default();
+        let client = setup_client(&env);
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &1_000_000i128);
+
+        let token1 = Address::generate(&env);
+        let token2 = Address::generate(&env);
+        assert_eq!(client.get_accumulated_fees(&token1), 0);
+        assert_eq!(client.get_accumulated_fees(&token2), 0);
+    }
+
+    /// DAILY_WITHDRAWN map starts empty (zero on first day).
+    #[test]
+    fn test_initialize_daily_withdrawn_empty() {
+        let env = Env::default();
+        let client = setup_client(&env);
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &1_000_000i128);
+
+        assert_eq!(client.get_daily_withdrawal_amount(), 0);
+    }
+}

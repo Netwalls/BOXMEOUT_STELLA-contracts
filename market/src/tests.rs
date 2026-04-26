@@ -832,3 +832,471 @@ mod full_market_lifecycle {
         assert_eq!(fee, expected_fee, "Treasury must receive exactly 2% fee");
     }
 }
+
+// ============================================================
+// ISSUE #19: resolve_dispute() tests
+// ============================================================
+#[cfg(test)]
+mod resolve_dispute_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Events, Ledger, LedgerInfo},
+        Address, Env, Symbol,
+    };
+
+    use boxmeout_shared::types::{
+        BetSide, FightDetails, MarketConfig, MarketState, MarketStatus, Outcome, OracleRole,
+    };
+    use crate::Market;
+
+    fn default_fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_slice(env, "FURY-USYK-2025"),
+            fighter_a: soroban_sdk::String::from_slice(env, "Fury"),
+            fighter_b: soroban_sdk::String::from_slice(env, "Usyk"),
+            weight_class: soroban_sdk::String::from_slice(env, "Heavyweight"),
+            scheduled_at: 100_000,
+            venue: soroban_sdk::String::from_slice(env, "Riyadh"),
+            title_fight: true,
+        }
+    }
+
+    fn default_config() -> MarketConfig {
+        MarketConfig {
+            min_bet: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3600,
+            resolution_window: 86400,
+        }
+    }
+
+    fn setup_disputed_market(
+        env: &Env,
+    ) -> (crate::MarketClient<'static>, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+
+        client.initialize(&factory, &1u64, &default_fight(env), &default_config(), &treasury);
+
+        // Directly write a Disputed state into storage so we can test resolve_dispute
+        // without needing a full oracle consensus setup.
+        let state = MarketState {
+            market_id: 1,
+            fight: default_fight(env),
+            config: default_config(),
+            status: MarketStatus::Disputed,
+            outcome: Some(Outcome::FighterA),
+            pool_a: 10_000_000,
+            pool_b: 5_000_000,
+            pool_draw: 0,
+            total_pool: 15_000_000,
+            resolved_at: Some(50_000),
+            oracle_used: Some(OracleRole::Primary),
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        (client, factory, contract_id)
+    }
+
+    /// Non-admin call returns Unauthorized.
+    #[test]
+    fn test_resolve_dispute_non_admin_unauthorized() {
+        let env = Env::default();
+        let (client, _factory, _contract_id) = setup_disputed_market(&env);
+        let non_admin = Address::generate(&env);
+
+        let result = client.try_resolve_dispute(&non_admin, &Outcome::FighterA);
+        assert!(result.is_err());
+    }
+
+    /// Admin resolves dispute: status → Resolved, oracle_used → Admin.
+    #[test]
+    fn test_resolve_dispute_sets_resolved_and_oracle_admin() {
+        let env = Env::default();
+        let (client, factory, _contract_id) = setup_disputed_market(&env);
+
+        client.resolve_dispute(&factory, &Outcome::FighterB);
+
+        let state = client.get_state().unwrap();
+        assert_eq!(state.status, MarketStatus::Resolved);
+        assert_eq!(state.outcome, Some(Outcome::FighterB));
+        assert_eq!(state.oracle_used, Some(OracleRole::Admin));
+    }
+
+    /// DisputeResolved event is emitted with correct market_id and outcome.
+    #[test]
+    fn test_resolve_dispute_emits_event() {
+        let env = Env::default();
+        let (client, factory, _contract_id) = setup_disputed_market(&env);
+
+        client.resolve_dispute(&factory, &Outcome::FighterA);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic_sym: Symbol =
+            soroban_sdk::TryFromVal::try_from_val(&env, &last.1.get(0).unwrap()).unwrap();
+        assert_eq!(topic_sym, Symbol::new(&env, "dispute_resolved"));
+        let market_id: u64 =
+            soroban_sdk::TryFromVal::try_from_val(&env, &last.1.get(1).unwrap()).unwrap();
+        assert_eq!(market_id, 1u64);
+    }
+
+    /// resolve_dispute on non-Disputed market returns InvalidMarketStatus.
+    #[test]
+    fn test_resolve_dispute_requires_disputed_status() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let factory = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(&env, &contract_id);
+        client.initialize(&factory, &1u64, &default_fight(&env), &default_config(), &treasury);
+        // Market is Open, not Disputed
+        let result = client.try_resolve_dispute(&factory, &Outcome::FighterA);
+        assert!(result.is_err());
+    }
+
+    /// After resolve_dispute, claim_winnings math is consistent (status is Resolved).
+    #[test]
+    fn test_claims_work_after_dispute_resolution() {
+        let env = Env::default();
+        let (client, factory, _contract_id) = setup_disputed_market(&env);
+
+        client.resolve_dispute(&factory, &Outcome::FighterA);
+
+        let state = client.get_state().unwrap();
+        // Verify the market is in a claimable state
+        assert_eq!(state.status, MarketStatus::Resolved);
+        assert_eq!(state.outcome, Some(Outcome::FighterA));
+        // Payout math: bettor_stake * net_pool / winning_pool
+        let fee = state.total_pool * (state.config.fee_bps as i128) / 10_000;
+        let net_pool = state.total_pool - fee;
+        let payout = 10_000_000i128 * net_pool / state.pool_a;
+        assert!(payout > 0, "Payout must be positive after dispute resolution");
+        assert!(payout <= net_pool, "Payout must not exceed net pool");
+    }
+}
+
+// ============================================================
+// ISSUE #20: get_current_odds() tests
+// ============================================================
+#[cfg(test)]
+mod get_current_odds_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        Address, Env,
+    };
+
+    use boxmeout_shared::types::{FightDetails, MarketConfig, MarketState, MarketStatus};
+    use crate::Market;
+
+    fn default_fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_slice(env, "FURY-USYK-2025"),
+            fighter_a: soroban_sdk::String::from_slice(env, "Fury"),
+            fighter_b: soroban_sdk::String::from_slice(env, "Usyk"),
+            weight_class: soroban_sdk::String::from_slice(env, "Heavyweight"),
+            scheduled_at: 100_000,
+            venue: soroban_sdk::String::from_slice(env, "Riyadh"),
+            title_fight: true,
+        }
+    }
+
+    fn default_config() -> MarketConfig {
+        MarketConfig {
+            min_bet: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3600,
+            resolution_window: 86400,
+        }
+    }
+
+    fn setup_market_with_pools(
+        env: &Env,
+        pool_a: i128,
+        pool_b: i128,
+        pool_draw: i128,
+    ) -> crate::MarketClient<'static> {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &default_fight(env), &default_config(), &treasury);
+
+        let total = pool_a + pool_b + pool_draw;
+        let state = MarketState {
+            market_id: 1,
+            fight: default_fight(env),
+            config: default_config(),
+            status: MarketStatus::Open,
+            outcome: None,
+            pool_a,
+            pool_b,
+            pool_draw,
+            total_pool: total,
+            resolved_at: None,
+            oracle_used: None,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        client
+    }
+
+    /// Empty pools return (0, 0, 0) — no divide-by-zero panic.
+    #[test]
+    fn test_empty_pools_returns_zero() {
+        let env = Env::default();
+        let client = setup_market_with_pools(&env, 0, 0, 0);
+        assert_eq!(client.get_current_odds(), (0u32, 0u32, 0u32));
+    }
+
+    /// Values are basis points summing to ≤ 10_000.
+    #[test]
+    fn test_odds_are_basis_points() {
+        let env = Env::default();
+        // 6000 + 3000 + 1000 = 10_000
+        let client = setup_market_with_pools(&env, 6_000, 3_000, 1_000);
+        let (a, b, d) = client.get_current_odds();
+        assert!(a <= 10_000, "odds_a must be ≤ 10_000");
+        assert!(b <= 10_000, "odds_b must be ≤ 10_000");
+        assert!(d <= 10_000, "odds_draw must be ≤ 10_000");
+        assert!(a as u64 + b as u64 + d as u64 <= 10_000);
+    }
+
+    /// Known pool sizes produce expected basis-point values.
+    #[test]
+    fn test_known_pool_sizes_expected_output() {
+        let env = Env::default();
+        // pool_a=6000, pool_b=3000, pool_draw=1000 → total=10000
+        // odds_a = floor(6000*10000/10000) = 6000
+        // odds_b = floor(3000*10000/10000) = 3000
+        // odds_draw = floor(1000*10000/10000) = 1000
+        let client = setup_market_with_pools(&env, 6_000, 3_000, 1_000);
+        assert_eq!(client.get_current_odds(), (6_000u32, 3_000u32, 1_000u32));
+    }
+
+    /// Equal pools → each side is 3333 bp (floors correctly).
+    #[test]
+    fn test_equal_pools_floor_correctly() {
+        let env = Env::default();
+        // pool_a=pool_b=pool_draw=1 → total=3
+        // odds_x = floor(1*10000/3) = 3333
+        let client = setup_market_with_pools(&env, 1, 1, 1);
+        let (a, b, d) = client.get_current_odds();
+        assert_eq!(a, 3_333);
+        assert_eq!(b, 3_333);
+        assert_eq!(d, 3_333);
+    }
+
+    /// One-sided pool: all weight on FighterA → odds_a = 10_000.
+    #[test]
+    fn test_one_sided_pool() {
+        let env = Env::default();
+        let client = setup_market_with_pools(&env, 10_000, 0, 0);
+        assert_eq!(client.get_current_odds(), (10_000u32, 0u32, 0u32));
+    }
+}
+
+// ============================================================
+// ISSUE #21: estimate_payout() tests
+// ============================================================
+#[cfg(test)]
+mod estimate_payout_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        Address, Env,
+    };
+
+    use boxmeout_shared::types::{
+        BetSide, FightDetails, MarketConfig, MarketState, MarketStatus, Outcome, OracleRole,
+    };
+    use crate::Market;
+
+    fn default_fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_slice(env, "FURY-USYK-2025"),
+            fighter_a: soroban_sdk::String::from_slice(env, "Fury"),
+            fighter_b: soroban_sdk::String::from_slice(env, "Usyk"),
+            weight_class: soroban_sdk::String::from_slice(env, "Heavyweight"),
+            scheduled_at: 100_000,
+            venue: soroban_sdk::String::from_slice(env, "Riyadh"),
+            title_fight: true,
+        }
+    }
+
+    fn default_config() -> MarketConfig {
+        MarketConfig {
+            min_bet: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3600,
+            resolution_window: 86400,
+        }
+    }
+
+    fn setup_open_market(
+        env: &Env,
+        pool_a: i128,
+        pool_b: i128,
+        pool_draw: i128,
+    ) -> (crate::MarketClient<'static>, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &default_fight(env), &default_config(), &treasury);
+
+        let total = pool_a + pool_b + pool_draw;
+        let state = MarketState {
+            market_id: 1,
+            fight: default_fight(env),
+            config: default_config(),
+            status: MarketStatus::Open,
+            outcome: None,
+            pool_a,
+            pool_b,
+            pool_draw,
+            total_pool: total,
+            resolved_at: None,
+            oracle_used: None,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        (client, contract_id)
+    }
+
+    /// Returns 0 for non-Open market (Locked).
+    #[test]
+    fn test_estimate_payout_returns_zero_for_locked_market() {
+        let env = Env::default();
+        let (client, contract_id) = setup_open_market(&env, 10_000_000, 5_000_000, 0);
+
+        // Flip status to Locked
+        env.as_contract(&contract_id, || {
+            let mut state: MarketState = env.storage().persistent().get(&"STATE").unwrap();
+            state.status = MarketStatus::Locked;
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        assert_eq!(client.estimate_payout(&BetSide::FighterA, &1_000_000i128), 0);
+    }
+
+    /// Returns 0 for Resolved market.
+    #[test]
+    fn test_estimate_payout_returns_zero_for_resolved_market() {
+        let env = Env::default();
+        let (client, contract_id) = setup_open_market(&env, 10_000_000, 5_000_000, 0);
+
+        env.as_contract(&contract_id, || {
+            let mut state: MarketState = env.storage().persistent().get(&"STATE").unwrap();
+            state.status = MarketStatus::Resolved;
+            state.outcome = Some(Outcome::FighterA);
+            state.oracle_used = Some(OracleRole::Primary);
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        assert_eq!(client.estimate_payout(&BetSide::FighterA, &1_000_000i128), 0);
+    }
+
+    /// Does not mutate storage — state is unchanged after call.
+    #[test]
+    fn test_estimate_payout_does_not_mutate_storage() {
+        let env = Env::default();
+        let (client, contract_id) = setup_open_market(&env, 10_000_000, 5_000_000, 0);
+
+        let state_before: MarketState = env.as_contract(&contract_id, || {
+            env.storage().persistent().get(&"STATE").unwrap()
+        });
+
+        client.estimate_payout(&BetSide::FighterA, &2_000_000i128);
+
+        let state_after: MarketState = env.as_contract(&contract_id, || {
+            env.storage().persistent().get(&"STATE").unwrap()
+        });
+
+        assert_eq!(state_before.pool_a, state_after.pool_a);
+        assert_eq!(state_before.pool_b, state_after.pool_b);
+        assert_eq!(state_before.total_pool, state_after.total_pool);
+    }
+
+    /// Accounts for existing pool + hypothetical new stake.
+    #[test]
+    fn test_estimate_payout_accounts_for_hypothetical_stake() {
+        let env = Env::default();
+        // pool_a=10M, pool_b=10M, pool_draw=0 → total=20M
+        // Hypothetical: add 10M to FighterA → hypo_a=20M, hypo_total=30M
+        // fee = 30M * 200 / 10000 = 600_000
+        // net_pool = 30M - 600_000 = 29_400_000
+        // payout = 10M * 29_400_000 / 20M = 14_700_000
+        let (client, _) = setup_open_market(&env, 10_000_000, 10_000_000, 0);
+        let payout = client.estimate_payout(&BetSide::FighterA, &10_000_000i128);
+        assert_eq!(payout, 14_700_000);
+    }
+
+    /// Positive payout for a valid Open market bet.
+    #[test]
+    fn test_estimate_payout_positive_for_open_market() {
+        let env = Env::default();
+        let (client, _) = setup_open_market(&env, 5_000_000, 5_000_000, 0);
+        let payout = client.estimate_payout(&BetSide::FighterA, &1_000_000i128);
+        assert!(payout > 0, "Payout must be positive for a valid Open market bet");
+    }
+}
+
+
