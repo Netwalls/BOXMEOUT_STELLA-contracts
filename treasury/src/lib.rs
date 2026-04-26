@@ -258,7 +258,7 @@ impl Treasury {
             token_client.transfer(&env.current_contract_address(), &admin, &balance);
         }
 
-        boxmeout_shared::emit_emergency_drain(&env, token, balance);
+        boxmeout_shared::emit_emergency_drain(&env, token, balance, admin);
         Ok(())
     }
 }
@@ -266,8 +266,9 @@ impl Treasury {
 #[cfg(test)]
 mod tests {
     use soroban_sdk::{
-        testutils::Address as _,
-        Address, Env,
+        testutils::{Address as _, Events},
+        token::StellarAssetClient,
+        Address, Env, Symbol,
     };
 
     use super::{Treasury, TreasuryClient};
@@ -281,6 +282,14 @@ mod tests {
         let market = Address::generate(&env);
         client.initialize(&admin, &1_000_000_i128);
         (env, client, admin, market)
+    }
+
+    /// Registers a Stellar Asset Contract, mints `amount` to `recipient`, and
+    /// returns the token address.
+    fn setup_token(env: &Env, admin: &Address, recipient: &Address, amount: i128) -> Address {
+        let token_id = env.register_stellar_asset_contract(admin.clone());
+        StellarAssetClient::new(env, &token_id).mint(recipient, &amount);
+        token_id
     }
 
     #[test]
@@ -319,5 +328,80 @@ mod tests {
         let non_admin = Address::generate(&env);
         client.approve_market(&admin, &market);
         client.revoke_market(&non_admin, &market);
+    }
+
+    // ── emergency_drain ──────────────────────────────────────────────────────
+
+    /// Seed ACCUMULATED_FEES by depositing via an approved market, then drain.
+    fn setup_with_deposit(
+        amount: i128,
+    ) -> (Env, TreasuryClient<'static>, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, Treasury);
+        let client = TreasuryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let market = Address::generate(&env);
+        client.initialize(&admin, &1_000_000_i128);
+
+        // Create a real token, mint to market so the transfer in deposit_fees succeeds.
+        let token = setup_token(&env, &admin, &market, amount);
+
+        client.approve_market(&admin, &market);
+        client.deposit_fees(&market, &token, &amount);
+
+        (env, client, admin, market, token)
+    }
+
+    #[test]
+    fn emergency_drain_transfers_full_balance_to_admin() {
+        let (env, client, admin, _market, token) = setup_with_deposit(500_000);
+
+        client.emergency_drain(&admin, &token);
+
+        // ACCUMULATED_FEES should be zero after drain
+        assert_eq!(client.get_accumulated_fees(&token), 0);
+
+        // Admin's token balance should equal the drained amount
+        let token_client = soroban_sdk::token::Client::new(&env, &token);
+        assert_eq!(token_client.balance(&admin), 500_000);
+    }
+
+    #[test]
+    fn emergency_drain_zeros_accumulated_fees() {
+        let (_env, client, admin, _market, token) = setup_with_deposit(1_000_000);
+
+        assert_eq!(client.get_accumulated_fees(&token), 1_000_000);
+        client.emergency_drain(&admin, &token);
+        assert_eq!(client.get_accumulated_fees(&token), 0);
+    }
+
+    #[test]
+    fn emergency_drain_emits_event_with_correct_data() {
+        let (env, client, admin, _market, token) = setup_with_deposit(250_000);
+
+        client.emergency_drain(&admin, &token);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        // topics is Vec<Val>; first topic is the symbol
+        let topic_sym: soroban_sdk::Symbol =
+            soroban_sdk::TryFromVal::try_from_val(&env, &last.1.get(0).unwrap()).unwrap();
+        assert_eq!(topic_sym, Symbol::new(&env, "emergency_drain"));
+        // data is (token, amount, admin)
+        let (ev_token, ev_amount, ev_admin): (Address, i128, Address) =
+            soroban_sdk::TryFromVal::try_from_val(&env, &last.2).unwrap();
+        assert_eq!(ev_token, token);
+        assert_eq!(ev_amount, 250_000_i128);
+        assert_eq!(ev_admin, admin);
+    }
+
+    #[test]
+    fn emergency_drain_non_admin_returns_unauthorized() {
+        let (env, client, _admin, _market, token) = setup_with_deposit(100_000);
+        let non_admin = Address::generate(&env);
+
+        let result = client.try_emergency_drain(&non_admin, &token);
+        assert!(result.is_err());
     }
 }

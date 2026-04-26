@@ -67,9 +67,9 @@ pub fn emit_fee_withdrawn(env: &Env, token: Address, amount: i128, destination: 
     env.events().publish(topics, (token, amount, destination));
 }
 
-pub fn emit_emergency_drain(env: &Env, token: Address, amount: i128) {
+pub fn emit_emergency_drain(env: &Env, token: Address, amount: i128, admin: Address) {
     let topics = (Symbol::new(env, "emergency_drain"),);
-    env.events().publish(topics, (token, amount));
+    env.events().publish(topics, (token, amount, admin));
 }
 
 pub fn emit_config_updated(env: &Env, param_name: String, new_value: i128) {
@@ -301,11 +301,12 @@ mod tests {
     fn test_emit_emergency_drain() {
         let env = env();
         let token = addr(&env);
-        emit_emergency_drain(&env, token.clone(), 50_000_000);
+        let admin = addr(&env);
+        emit_emergency_drain(&env, token.clone(), 50_000_000, admin.clone());
 
         let (topics, data) = sole_event!(env);
         assert_eq!(topics, (Symbol::new(&env, "emergency_drain"),).into_val(&env));
-        assert_eq!(data, (token, 50_000_000_i128).into_val(&env));
+        assert_eq!(data, (token, 50_000_000_i128, admin).into_val(&env));
     }
 
     // ── config_updated ───────────────────────────────────────────────────────
