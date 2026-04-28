@@ -1464,8 +1464,7 @@ mod oracle_sig_tests {
     #[test]
     fn test_resolve_market_non_whitelisted_oracle_rejected() {
         // Cross-contract whitelist check requires a deployed factory.
-        // Verify the logic path exists in the contract source.
-        assert!(true, "Covered by integration tests");
+        // Covered by integration tests.
     }
 
     /// Resolution window expired returns ResolutionWindowExpired.
