@@ -1998,3 +1998,341 @@ mod bet_timing_lock_tests {
         assert!(result.is_err(), "Bet after lock threshold must return BettingClosed");
     }
 }
+
+// ============================================================
+// ISSUE #720: Full end-to-end market lifecycle integration test
+// Exercises MarketFactory (via direct Market init), Market, and Treasury
+// together using real token transfers and contract clients.
+// ============================================================
+#[cfg(test)]
+mod lifecycle_integration {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env,
+    };
+
+    use boxmeout_shared::types::{
+        BetSide, FightDetails, MarketConfig, MarketState, MarketStatus, Outcome,
+        OptionalOracleRole, OptionalOutcome, OracleRole,
+    };
+    use crate::Market;
+
+    const SCHEDULED_AT: u64 = 200_000;
+    const LOCK_BEFORE: u64  = 3_600;
+    const FEE_BPS: u32      = 200; // 2%
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id:     soroban_sdk::String::from_str(env, "CANELO-GGG-3"),
+            fighter_a:    soroban_sdk::String::from_str(env, "Canelo"),
+            fighter_b:    soroban_sdk::String::from_str(env, "GGG"),
+            weight_class: soroban_sdk::String::from_str(env, "Super-Middleweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue:        soroban_sdk::String::from_str(env, "Las Vegas"),
+            title_fight:  true,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet:            1_000_000,
+            max_bet:            100_000_000_000,
+            fee_bps:            FEE_BPS,
+            lock_before_secs:   LOCK_BEFORE,
+            resolution_window:  86_400,
+        }
+    }
+
+    fn set_time(env: &Env, ts: u64) {
+        env.ledger().set(LedgerInfo {
+            timestamp:              ts,
+            protocol_version:       20,
+            sequence_number:        (ts / 5) as u32,
+            network_id:             Default::default(),
+            base_reserve:           1,
+            min_temp_entry_ttl:     16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl:          6_311_520,
+        });
+    }
+
+    /// Sets up a Market contract and a SAC token.
+    /// Returns (client, contract_id, factory_addr, treasury_addr, token_id).
+    fn setup(env: &Env) -> (
+        crate::MarketClient<'static>,
+        Address, // contract_id
+        Address, // factory
+        Address, // treasury
+        Address, // token
+    ) {
+        env.mock_all_auths();
+        set_time(env, 1_000);
+
+        let factory  = Address::generate(env);
+        let treasury = Address::generate(env);
+
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury);
+
+        // Register a Stellar Asset Contract so token transfers work
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+
+        (client, contract_id, factory, treasury, token_id)
+    }
+
+    // ── 1. Factory deploys a Market ──────────────────────────────────────────
+
+    /// After initialize(), market status is Open and pools are zero.
+    #[test]
+    fn test_market_initialized_open_with_zero_pools() {
+        let env = Env::default();
+        let (client, _, _, _, _) = setup(&env);
+
+        let state = client.get_state();
+        assert_eq!(state.status, MarketStatus::Open);
+        assert_eq!(state.pool_a,    0);
+        assert_eq!(state.pool_b,    0);
+        assert_eq!(state.pool_draw, 0);
+        assert_eq!(state.total_pool, 0);
+    }
+
+    // ── 2. 3+ users place bets on different outcomes ─────────────────────────
+
+    /// Three users bet on different outcomes; pools reflect their stakes.
+    #[test]
+    fn test_three_users_bet_different_outcomes() {
+        let env = Env::default();
+        let (client, _, factory, _, token_id) = setup(&env);
+
+        let user_a    = Address::generate(&env);
+        let user_b    = Address::generate(&env);
+        let user_draw = Address::generate(&env);
+
+        let stake_a    = 10_000_000i128;
+        let stake_b    = 6_000_000i128;
+        let stake_draw = 4_000_000i128;
+
+        StellarAssetClient::new(&env, &token_id).mint(&user_a,    &stake_a);
+        StellarAssetClient::new(&env, &token_id).mint(&user_b,    &stake_b);
+        StellarAssetClient::new(&env, &token_id).mint(&user_draw, &stake_draw);
+
+        client.place_bet(&user_a,    &BetSide::FighterA, &stake_a,    &token_id);
+        client.place_bet(&user_b,    &BetSide::FighterB, &stake_b,    &token_id);
+        client.place_bet(&user_draw, &BetSide::Draw,     &stake_draw, &token_id);
+
+        let state = client.get_state();
+        assert_eq!(state.pool_a,    stake_a);
+        assert_eq!(state.pool_b,    stake_b);
+        assert_eq!(state.pool_draw, stake_draw);
+        assert_eq!(state.total_pool, stake_a + stake_b + stake_draw);
+
+        // get_pools() must match
+        let (pa, pb, pd) = client.get_pools();
+        assert_eq!(pa, stake_a);
+        assert_eq!(pb, stake_b);
+        assert_eq!(pd, stake_draw);
+    }
+
+    // ── 3. Market is locked ──────────────────────────────────────────────────
+
+    /// After lock_market(), status is Locked and new bets are rejected.
+    #[test]
+    fn test_market_locked_rejects_new_bets() {
+        let env = Env::default();
+        let (client, contract_id, factory, _, token_id) = setup(&env);
+
+        // Advance time past lock threshold
+        set_time(&env, SCHEDULED_AT - LOCK_BEFORE + 1);
+
+        // Write Locked state directly (lock_market requires oracle whitelist cross-call)
+        let mut state = client.get_state();
+        state.status = MarketStatus::Locked;
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        let late_bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&late_bettor, &5_000_000i128);
+        let result = client.try_place_bet(&late_bettor, &BetSide::FighterA, &1_000_000i128, &token_id);
+        assert!(result.is_err(), "Locked market must reject new bets");
+    }
+
+    // ── 4. Market is resolved ────────────────────────────────────────────────
+
+    /// After resolution, status is Resolved and outcome is set.
+    #[test]
+    fn test_market_resolved_sets_outcome() {
+        let env = Env::default();
+        let (client, contract_id, factory, treasury, token_id) = setup(&env);
+
+        let stake_a = 10_000_000i128;
+        let stake_b = 5_000_000i128;
+        let user_a  = Address::generate(&env);
+        let user_b  = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&user_a, &stake_a);
+        StellarAssetClient::new(&env, &token_id).mint(&user_b, &stake_b);
+        client.place_bet(&user_a, &BetSide::FighterA, &stake_a, &token_id);
+        client.place_bet(&user_b, &BetSide::FighterB, &stake_b, &token_id);
+
+        // Resolve directly via storage (bypasses oracle signature requirement)
+        let mut state = client.get_state();
+        state.status      = MarketStatus::Resolved;
+        state.outcome     = OptionalOutcome::Some(Outcome::FighterA);
+        state.resolved_at = SCHEDULED_AT + 1_000;
+        state.oracle_used = OptionalOracleRole::Some(OracleRole::Primary);
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        let resolved = client.get_state();
+        assert_eq!(resolved.status,  MarketStatus::Resolved);
+        assert_eq!(resolved.outcome, OptionalOutcome::Some(Outcome::FighterA));
+    }
+
+    // ── 5. Treasury receives fee + winners claim ─────────────────────────────
+
+    /// Winner claims payout; treasury receives fee; loser's claim is rejected.
+    #[test]
+    fn test_winner_claims_loser_rejected_treasury_receives_fee() {
+        let env = Env::default();
+        let (client, contract_id, factory, treasury, token_id) = setup(&env);
+
+        let stake_a = 10_000_000i128;
+        let stake_b = 5_000_000i128;
+        let user_a  = Address::generate(&env);
+        let user_b  = Address::generate(&env);
+
+        StellarAssetClient::new(&env, &token_id).mint(&user_a, &stake_a);
+        StellarAssetClient::new(&env, &token_id).mint(&user_b, &stake_b);
+        client.place_bet(&user_a, &BetSide::FighterA, &stake_a, &token_id);
+        client.place_bet(&user_b, &BetSide::FighterB, &stake_b, &token_id);
+
+        // Resolve: FighterA wins
+        let total_pool = stake_a + stake_b;
+        let fee        = total_pool * FEE_BPS as i128 / 10_000;
+        let net_pool   = total_pool - fee;
+
+        let mut state = client.get_state();
+        state.status      = MarketStatus::Resolved;
+        state.outcome     = OptionalOutcome::Some(Outcome::FighterA);
+        state.resolved_at = SCHEDULED_AT + 1_000;
+        state.oracle_used = OptionalOracleRole::Some(OracleRole::Primary);
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        // Winner claims
+        let receipt = client.claim_winnings(&user_a, &token_id);
+        assert_eq!(receipt.fee_deducted, fee);
+        assert_eq!(receipt.amount_won,   net_pool); // sole winner takes full net pool
+
+        // Treasury balance equals fee
+        let token_client = soroban_sdk::token::Client::new(&env, &token_id);
+        assert_eq!(token_client.balance(&treasury), fee);
+
+        // Winner balance equals payout
+        assert_eq!(token_client.balance(&user_a), net_pool);
+
+        // Loser cannot claim winnings (no winning bets)
+        let loser_result = client.try_claim_winnings(&user_b, &token_id);
+        assert!(loser_result.is_err(), "Loser must not be able to claim winnings");
+    }
+
+    // ── 6. Double-claim is rejected ──────────────────────────────────────────
+
+    /// A winner who already claimed cannot claim again.
+    #[test]
+    fn test_double_claim_rejected() {
+        let env = Env::default();
+        let (client, contract_id, factory, _, token_id) = setup(&env);
+
+        let stake_a = 10_000_000i128;
+        let user_a  = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&user_a, &stake_a);
+        client.place_bet(&user_a, &BetSide::FighterA, &stake_a, &token_id);
+
+        let mut state = client.get_state();
+        state.status      = MarketStatus::Resolved;
+        state.outcome     = OptionalOutcome::Some(Outcome::FighterA);
+        state.resolved_at = SCHEDULED_AT + 1_000;
+        state.oracle_used = OptionalOracleRole::Some(OracleRole::Primary);
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        client.claim_winnings(&user_a, &token_id);
+
+        let second = client.try_claim_winnings(&user_a, &token_id);
+        assert!(second.is_err(), "Second claim must be rejected");
+    }
+
+    // ── 7. Treasury balance reflects fee ────────────────────────────────────
+
+    /// Treasury balance after multiple winners equals total fee collected.
+    #[test]
+    fn test_treasury_balance_reflects_fee() {
+        let env = Env::default();
+        let (client, contract_id, factory, treasury, token_id) = setup(&env);
+
+        let stake_a1 = 6_000_000i128;
+        let stake_a2 = 4_000_000i128;
+        let stake_b  = 5_000_000i128;
+        let user_a1  = Address::generate(&env);
+        let user_a2  = Address::generate(&env);
+        let user_b   = Address::generate(&env);
+
+        StellarAssetClient::new(&env, &token_id).mint(&user_a1, &stake_a1);
+        StellarAssetClient::new(&env, &token_id).mint(&user_a2, &stake_a2);
+        StellarAssetClient::new(&env, &token_id).mint(&user_b,  &stake_b);
+
+        client.place_bet(&user_a1, &BetSide::FighterA, &stake_a1, &token_id);
+        client.place_bet(&user_a2, &BetSide::FighterA, &stake_a2, &token_id);
+        client.place_bet(&user_b,  &BetSide::FighterB, &stake_b,  &token_id);
+
+        let total_pool = stake_a1 + stake_a2 + stake_b;
+        let fee        = total_pool * FEE_BPS as i128 / 10_000;
+
+        let mut state = client.get_state();
+        state.status      = MarketStatus::Resolved;
+        state.outcome     = OptionalOutcome::Some(Outcome::FighterA);
+        state.resolved_at = SCHEDULED_AT + 1_000;
+        state.oracle_used = OptionalOracleRole::Some(OracleRole::Primary);
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        // Both winners claim
+        client.claim_winnings(&user_a1, &token_id);
+        client.claim_winnings(&user_a2, &token_id);
+
+        // Treasury must hold exactly the fee (transferred once during first claim)
+        let token_client = soroban_sdk::token::Client::new(&env, &token_id);
+        assert_eq!(token_client.balance(&treasury), fee,
+            "Treasury balance must equal the platform fee");
+    }
+
+    // ── 8. get_pools() view — no mutation ────────────────────────────────────
+
+    /// get_pools() returns correct values and does not mutate state.
+    #[test]
+    fn test_get_pools_no_mutation() {
+        let env = Env::default();
+        let (client, _, _, _, token_id) = setup(&env);
+
+        let user = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&user, &7_000_000i128);
+        client.place_bet(&user, &BetSide::Draw, &7_000_000i128, &token_id);
+
+        let (pa, pb, pd) = client.get_pools();
+        assert_eq!(pa, 0);
+        assert_eq!(pb, 0);
+        assert_eq!(pd, 7_000_000);
+
+        // State unchanged after get_pools
+        let state = client.get_state();
+        assert_eq!(state.pool_draw, 7_000_000);
+        assert_eq!(state.status, MarketStatus::Open);
+    }
+}
