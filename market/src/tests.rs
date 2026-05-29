@@ -2108,3 +2108,156 @@ mod min_bet_enforcement_tests {
         assert!(ok.is_ok());
     }
 }
+
+// ============================================================
+// ISSUE #711: get_all_bets() pagination tests
+// ============================================================
+#[cfg(test)]
+mod get_all_bets_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env,
+    };
+    use boxmeout_shared::types::{BetSide, FightDetails, MarketConfig};
+    use crate::Market;
+
+    const SCHEDULED_AT: u64 = 100_000;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "FURY-USYK-2025"),
+            fighter_a: soroban_sdk::String::from_str(env, "Fury"),
+            fighter_b: soroban_sdk::String::from_str(env, "Usyk"),
+            weight_class: soroban_sdk::String::from_str(env, "Heavyweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "Riyadh"),
+            title_fight: true,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    fn setup(env: &Env) -> (crate::MarketClient<'static>, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury);
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+        (client, token_id)
+    }
+
+    /// Returns empty vec when no bets placed.
+    #[test]
+    fn test_get_all_bets_empty_market() {
+        let env = Env::default();
+        let (client, _token) = setup(&env);
+        let result = client.get_all_bets(&0u32, &10u32);
+        assert_eq!(result.len(), 0);
+    }
+
+    /// Returns all bets when within limit.
+    #[test]
+    fn test_get_all_bets_returns_all_within_limit() {
+        let env = Env::default();
+        let (client, token_id) = setup(&env);
+
+        let bettor1 = Address::generate(&env);
+        let bettor2 = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor1, &2_000_000i128);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor2, &2_000_000i128);
+
+        client.place_bet(&bettor1, &BetSide::FighterA, &1_000_000i128, &token_id);
+        client.place_bet(&bettor2, &BetSide::FighterB, &1_000_000i128, &token_id);
+
+        let result = client.get_all_bets(&0u32, &10u32);
+        assert_eq!(result.len(), 2);
+    }
+
+    /// Pagination: offset skips correct number of records.
+    #[test]
+    fn test_get_all_bets_offset_pagination() {
+        let env = Env::default();
+        let (client, token_id) = setup(&env);
+
+        let bettor1 = Address::generate(&env);
+        let bettor2 = Address::generate(&env);
+        let bettor3 = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor1, &2_000_000i128);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor2, &2_000_000i128);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor3, &2_000_000i128);
+
+        client.place_bet(&bettor1, &BetSide::FighterA, &1_000_000i128, &token_id);
+        client.place_bet(&bettor2, &BetSide::FighterB, &1_000_000i128, &token_id);
+        client.place_bet(&bettor3, &BetSide::Draw, &1_000_000i128, &token_id);
+
+        // offset=1, limit=10 → should return 2 records
+        let result = client.get_all_bets(&1u32, &10u32);
+        assert_eq!(result.len(), 2);
+    }
+
+    /// limit capped at 50: passing 100 returns at most 50.
+    #[test]
+    fn test_get_all_bets_limit_capped_at_50() {
+        let env = Env::default();
+        let (client, token_id) = setup(&env);
+
+        for _ in 0..3 {
+            let bettor = Address::generate(&env);
+            StellarAssetClient::new(&env, &token_id).mint(&bettor, &2_000_000i128);
+            client.place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id);
+        }
+
+        // limit=100 capped at 50, but only 3 bets exist → returns 3
+        let result = client.get_all_bets(&0u32, &100u32);
+        assert_eq!(result.len(), 3);
+    }
+
+    /// offset beyond total returns empty vec.
+    #[test]
+    fn test_get_all_bets_offset_beyond_total_returns_empty() {
+        let env = Env::default();
+        let (client, token_id) = setup(&env);
+
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &2_000_000i128);
+        client.place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id);
+
+        let result = client.get_all_bets(&99u32, &10u32);
+        assert_eq!(result.len(), 0);
+    }
+
+    /// limit=0 returns empty vec.
+    #[test]
+    fn test_get_all_bets_limit_zero_returns_empty() {
+        let env = Env::default();
+        let (client, token_id) = setup(&env);
+
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &2_000_000i128);
+        client.place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id);
+
+        let result = client.get_all_bets(&0u32, &0u32);
+        assert_eq!(result.len(), 0);
+    }
+}

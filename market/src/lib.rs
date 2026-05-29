@@ -784,6 +784,37 @@ impl Market {
         list.len()
     }
 
+    /// Returns a paginated list of all bet records across all bettors.
+    /// `limit` is capped at 50. Returns an empty vec if no bets exist.
+    pub fn get_all_bets(env: Env, offset: u32, limit: u32) -> Vec<BetRecord> {
+        let cap: u32 = if limit > 50 { 50 } else { limit };
+        let bettor_list: Vec<Address> =
+            env.storage().persistent().get(&BETTOR_LIST).unwrap_or_else(|| Vec::new(&env));
+        let bets_map: soroban_sdk::Map<Address, Vec<BetRecord>> =
+            env.storage().persistent().get(&BETS).unwrap_or_else(|| soroban_sdk::Map::new(&env));
+
+        let mut all: Vec<BetRecord> = Vec::new(&env);
+        for addr in bettor_list.iter() {
+            if let Some(records) = bets_map.get(addr) {
+                for r in records.iter() {
+                    all.push_back(r);
+                }
+            }
+        }
+
+        let total = all.len();
+        let mut result: Vec<BetRecord> = Vec::new(&env);
+        let start = offset;
+        let end = (offset + cap).min(total);
+        if start >= total {
+            return result;
+        }
+        for i in start..end {
+            result.push_back(all.get(i).unwrap());
+        }
+        result
+    }
+
     /// Returns the current pool sizes for each outcome.
     pub fn get_pool_sizes(env: Env) -> (i128, i128, i128) {
         let state = match Self::load_state(&env) {
