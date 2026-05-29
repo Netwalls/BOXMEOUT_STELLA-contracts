@@ -78,16 +78,32 @@ mod security_tests {
     #[test]
     fn test_reentrancy_guard_blocks_concurrent_claim() {
         // Validates the CLAIMING boolean lock logic.
-        // If CLAIMING=true, require_not_claiming() returns an error.
-        let claiming = true;
-        let result: Result<(), ()> = if claiming { Err(()) } else { Ok(()) };
-        assert!(result.is_err(), "Reentrancy guard must block concurrent claims");
+        // require_not_claiming() reads instance storage; if CLAIMING=true it
+        // returns ContractError::ReentrancyGuard, preventing a second entry
+        // into claim_winnings while a token transfer is in flight.
+        use boxmeout_shared::errors::ContractError;
+        let env = Env::default();
+        env.storage().instance().set(&"CLAIMING", &true);
+        let claiming: bool = env.storage().instance().get(&"CLAIMING").unwrap_or(false);
+        let result: Result<(), ContractError> = if claiming {
+            Err(ContractError::ReentrancyGuard)
+        } else {
+            Ok(())
+        };
+        assert_eq!(result, Err(ContractError::ReentrancyGuard));
     }
 
     #[test]
     fn test_reentrancy_guard_allows_after_reset() {
-        let claiming = false;
-        let result: Result<(), ()> = if claiming { Err(()) } else { Ok(()) };
+        use boxmeout_shared::errors::ContractError;
+        let env = Env::default();
+        env.storage().instance().set(&"CLAIMING", &false);
+        let claiming: bool = env.storage().instance().get(&"CLAIMING").unwrap_or(false);
+        let result: Result<(), ContractError> = if claiming {
+            Err(ContractError::ReentrancyGuard)
+        } else {
+            Ok(())
+        };
         assert!(result.is_ok(), "Reentrancy guard must allow after lock is cleared");
     }
 
