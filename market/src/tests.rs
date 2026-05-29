@@ -1998,3 +1998,113 @@ mod bet_timing_lock_tests {
         assert!(result.is_err(), "Bet after lock threshold must return BettingClosed");
     }
 }
+
+// ============================================================
+// ISSUE #710: min_bet enforcement boundary tests
+// ============================================================
+#[cfg(test)]
+mod min_bet_enforcement_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env,
+    };
+    use boxmeout_shared::types::{BetSide, FightDetails, MarketConfig};
+    use crate::Market;
+
+    const SCHEDULED_AT: u64 = 100_000;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "FURY-USYK-2025"),
+            fighter_a: soroban_sdk::String::from_str(env, "Fury"),
+            fighter_b: soroban_sdk::String::from_str(env, "Usyk"),
+            weight_class: soroban_sdk::String::from_str(env, "Heavyweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "Riyadh"),
+            title_fight: true,
+        }
+    }
+
+    fn config(min_bet: i128) -> MarketConfig {
+        MarketConfig {
+            min_bet,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    fn setup(env: &Env, min_bet: i128) -> (crate::MarketClient<'static>, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(env), &config(min_bet), &treasury);
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+        (client, token_id)
+    }
+
+    /// Bet exactly at min_bet must succeed.
+    #[test]
+    fn test_bet_at_min_bet_succeeds() {
+        let env = Env::default();
+        let min_bet = 1_000_000i128;
+        let (client, token_id) = setup(&env, min_bet);
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &min_bet);
+        let result = client.try_place_bet(&bettor, &BetSide::FighterA, &min_bet, &token_id);
+        assert!(result.is_ok(), "Bet at exact min_bet must succeed");
+    }
+
+    /// Bet one stroop below min_bet must return BetTooSmall.
+    #[test]
+    fn test_bet_below_min_bet_returns_bet_too_small() {
+        let env = Env::default();
+        let min_bet = 1_000_000i128;
+        let (client, token_id) = setup(&env, min_bet);
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &min_bet);
+        let result = client.try_place_bet(&bettor, &BetSide::FighterA, &(min_bet - 1), &token_id);
+        assert!(result.is_err(), "Bet below min_bet must return BetTooSmall");
+    }
+
+    /// Bet of 1 stroop when min_bet is 1_000_000 must fail.
+    #[test]
+    fn test_bet_of_one_stroop_fails_when_min_bet_is_large() {
+        let env = Env::default();
+        let (client, token_id) = setup(&env, 1_000_000);
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &1_000_000);
+        let result = client.try_place_bet(&bettor, &BetSide::FighterB, &1i128, &token_id);
+        assert!(result.is_err());
+    }
+
+    /// min_bet read from storage (config set at initialize time).
+    #[test]
+    fn test_min_bet_read_from_storage() {
+        let env = Env::default();
+        let min_bet = 5_000_000i128;
+        let (client, token_id) = setup(&env, min_bet);
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &min_bet);
+        // min_bet - 1 must fail
+        let fail = client.try_place_bet(&bettor, &BetSide::FighterA, &(min_bet - 1), &token_id);
+        assert!(fail.is_err());
+        // min_bet must succeed
+        let ok = client.try_place_bet(&bettor, &BetSide::FighterA, &min_bet, &token_id);
+        assert!(ok.is_ok());
+    }
+}
