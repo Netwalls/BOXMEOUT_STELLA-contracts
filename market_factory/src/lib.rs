@@ -235,6 +235,22 @@ impl MarketFactory {
         map.get(market_id).ok_or(ContractError::MarketNotFound)
     }
 
+    /// Returns a paginated list of all market IDs.
+    /// Capped at 100 IDs per page.
+    pub fn list_market_ids(env: Env, offset: u64, limit: u32) -> Vec<u64> {
+        let open: Vec<u64> =
+            env.storage().persistent().get(&OPEN_MARKETS).unwrap_or_else(|| Vec::new(&env));
+        let cap = if limit > 100 { 100u32 } else { limit };
+        let mut result: Vec<u64> = Vec::new(&env);
+        let pos = offset as u32;
+        let mut fetched = 0u32;
+        while (pos + fetched) < open.len() && fetched < cap {
+            result.push_back(open.get(pos + fetched).unwrap());
+            fetched += 1;
+        }
+        result
+    }
+
     /// Lists markets with pagination.
     pub fn list_markets(env: Env, offset: u64, limit: u32) -> Vec<(u64, MarketStatus)> {
         let count: u64 = env.storage().persistent().get(&MARKET_COUNT).unwrap_or(0);
@@ -556,6 +572,7 @@ mod tests {
             &caller,
             &sample_fight(&env),
             &sample_market_config(&env),
+            &None,
         );
         assert!(result.is_err());
     }
@@ -573,6 +590,7 @@ mod tests {
             &caller,
             &fight,
             &sample_market_config(&env),
+            &None,
         );
         assert!(result.is_err());
     }
@@ -590,6 +608,7 @@ mod tests {
             &caller,
             &fight,
             &sample_market_config(&env),
+            &None,
         );
         assert!(result.is_err());
     }
@@ -607,6 +626,7 @@ mod tests {
             &caller,
             &sample_fight(&env),
             &config,
+            &None,
         );
         assert!(result.is_err());
     }
@@ -624,6 +644,7 @@ mod tests {
             &caller,
             &sample_fight(&env),
             &config,
+            &None,
         );
         assert!(result.is_err());
     }
@@ -641,6 +662,7 @@ mod tests {
             &caller,
             &sample_fight(&env),
             &config,
+            &None,
         );
         assert!(result.is_err());
     }
@@ -656,6 +678,7 @@ mod tests {
             &caller,
             &sample_fight(&env),
             &sample_market_config(&env),
+            &None,
         );
         assert!(result.is_err());
     }
@@ -669,5 +692,35 @@ mod tests {
 
         let result = client.try_get_market_address(&0u64);
         assert!(result.is_err());
+    }
+
+    // ── list_market_ids tests ──────────────────────────────
+
+    #[test]
+    fn test_list_market_ids_empty() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let ids = client.list_market_ids(&0u64, &10u32);
+        assert_eq!(ids.len(), 0);
+    }
+
+    #[test]
+    fn test_list_market_ids_pagination_capped_at_100() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        // Ask for more than the cap — should return at most 100
+        let ids = client.list_market_ids(&0u64, &200u32);
+        assert!(ids.len() <= 100);
+    }
+
+    #[test]
+    fn test_list_market_ids_offset_beyond_end_returns_empty() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let ids = client.list_market_ids(&999u64, &10u32);
+        assert_eq!(ids.len(), 0);
     }
 }
