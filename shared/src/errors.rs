@@ -60,4 +60,8 @@ pub enum ContractError {
     OracleAlreadyWhitelisted = 51,
     /// Vec of market IDs exceeds the maximum allowed (20)
     TooManyMarkets = 52,
+    /// Market configuration is invalid (e.g. max_bet < min_bet)
+    InvalidConfig = 53,
+    /// Market wasm hash has not been set by admin
+    WasmHashNotSet = 54,
 }
