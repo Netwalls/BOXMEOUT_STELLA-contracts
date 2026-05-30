@@ -61,10 +61,17 @@ impl Market {
     }
 
     /// Abort if a claim/refund is already in progress (reentrancy guard).
+    ///
+    /// # Why this is necessary
+    /// If the token contract is adversarial it could re-enter `claim_winnings`
+    /// during the transfer callback. Without this guard a second call would
+    /// pass all CHECKS (bets not yet marked claimed) and issue a double payout.
+    /// The CLAIMING flag is set in EFFECTS (before any transfer) and cleared
+    /// in CLEANUP (after all transfers), making re-entry impossible.
     fn require_not_claiming(env: &Env) -> Result<(), ContractError> {
         let claiming: bool = env.storage().instance().get(&CLAIMING).unwrap_or(false);
         if claiming {
-            return Err(ContractError::InvalidMarketStatus);
+            return Err(ContractError::ReentrancyGuard);
         }
         Ok(())
     }
@@ -822,6 +829,21 @@ impl Market {
             Err(_) => return (0, 0, 0),
         };
         (state.pool_a, state.pool_b, state.pool_draw)
+    }
+
+    /// Returns true if the bettor has already claimed winnings or a refund.
+    /// Returns false if the bettor has not placed any bet in this market.
+    pub fn has_claimed(env: Env, bettor: Address) -> bool {
+        let bets = Self::load_bets(&env, &bettor);
+        if bets.is_empty() {
+            return false;
+        }
+        bets.iter().all(|b| b.claimed)
+    }
+
+    /// Returns the current status of the market.
+    pub fn get_status(env: Env) -> Result<MarketStatus, ContractError> {
+        Ok(Self::load_state(&env)?.status)
     }
 
     // =========================================================================
