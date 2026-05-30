@@ -659,4 +659,15 @@ mod tests {
         );
         assert!(result.is_err());
     }
+
+    // ── get_market_address tests ───────────────────────────
+
+    #[test]
+    fn test_get_market_address_not_found() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let result = client.try_get_market_address(&0u64);
+        assert!(result.is_err());
+    }
 }
