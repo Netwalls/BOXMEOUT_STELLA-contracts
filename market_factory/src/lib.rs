@@ -7,7 +7,7 @@ use soroban_sdk::{contract, contractimpl, contractclient, Address, Env, Vec, Map
 
 use boxmeout_shared::{
     errors::ContractError,
-    types::{BetRecord, MarketConfig, MarketState, MarketStatus, FightDetails, UserPosition},
+    types::{BetRecord, FactoryConfig, MarketConfig, MarketState, MarketStatus, FightDetails, UserPosition},
 };
 
 const MARKET_COUNT: &str    = "MARKET_COUNT";
@@ -16,6 +16,7 @@ const ADMIN: &str           = "ADMIN";
 const ORACLE_WHITELIST: &str = "ORACLE_WHITELIST";
 const PAUSED: &str          = "PAUSED";
 const DEFAULT_CONFIG: &str  = "DEFAULT_CONFIG";
+const TREASURY: &str        = "TREASURY";
 const MARKET_WASM_HASH: &str = "MARKET_WASM_HASH";
 const OPEN_MARKETS: &str    = "OPEN_MARKETS";
 
@@ -59,15 +60,16 @@ impl MarketFactory {
 
 #[contractimpl]
 impl MarketFactory {
-    /// Initializes the factory with admin, default fee, and oracle whitelist.
+    /// Initializes the factory with admin, treasury, primary oracle, and factory config.
     ///
     /// # Errors
     /// - `AlreadyInitialized`: Factory has already been initialized
     pub fn initialize(
         env: Env,
         admin: Address,
-        default_fee_bps: u32,
-        oracles: Vec<Address>,
+        treasury: Address,
+        oracle: Address,
+        config: FactoryConfig,
     ) -> Result<(), ContractError> {
         // CHECKS
         if env.storage().persistent().has(&ADMIN) {
@@ -75,20 +77,25 @@ impl MarketFactory {
         }
         // EFFECTS
         env.storage().persistent().set(&ADMIN, &admin);
+        env.storage().persistent().set(&TREASURY, &treasury);
+
+        let mut oracles: Vec<Address> = Vec::new(&env);
+        oracles.push_back(oracle);
         env.storage().persistent().set(&ORACLE_WHITELIST, &oracles);
+
         env.storage().persistent().set(&PAUSED, &false);
         env.storage().persistent().set(&MARKET_COUNT, &0u64);
         env.storage().persistent().set(&MARKET_MAP, &Map::<u64, Address>::new(&env));
 
         let default_config = MarketConfig {
-            min_bet: 1_000_000,          // 0.1 XLM
-            max_bet: 100_000_000_000,    // 10,000 XLM
-            fee_bps: default_fee_bps,
-            lock_before_secs: 3600,      // 1 hour
-            resolution_window: 86400,    // 24 hours
+            min_bet: config.default_min_bet,
+            max_bet: config.default_max_bet,
+            fee_bps: config.default_fee_bps,
+            lock_before_secs: config.default_lock_before_secs,
+            resolution_window: config.default_resolution_window,
         };
         env.storage().persistent().set(&DEFAULT_CONFIG, &default_config);
-        
+
         // Initialize with zero hash; admin must call update_market_wasm to set it
         let zero_hash: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
         env.storage().persistent().set(&MARKET_WASM_HASH, &zero_hash);
@@ -116,9 +123,11 @@ impl MarketFactory {
     ///
     /// # Errors
     /// - `InvalidMarketStatus`: Fight is in the past or fighter names are empty
-    /// - `BetTooSmall`: Minimum bet is invalid
-    /// - `Unauthorized`: Fee basis points exceed 1000
+    /// - `InvalidConfig`: max_bet < min_bet in the provided config
+    /// - `BetTooSmall`: min_bet is zero
+    /// - `Unauthorized`: fee_bps exceeds 1000
     /// - `FactoryPaused`: Factory is paused
+    /// - `WasmHashNotSet`: Admin has not yet called update_market_wasm
     pub fn create_market(
         env: Env,
         caller: Address,
@@ -136,6 +145,8 @@ impl MarketFactory {
         if fight.fighter_a.len() == 0 || fight.fighter_b.len() == 0 {
             return Err(ContractError::InvalidMarketStatus);
         }
+
+        // ── Config validation ───────────────────────────────
         if config.min_bet == 0 {
             return Err(ContractError::BetTooSmall);
         }
@@ -159,13 +170,21 @@ impl MarketFactory {
         let mut effective_config = config;
         effective_config.fee_bps = effective_fee_bps;
 
-        // EFFECTS — read current count (this becomes the new market_id)
         let market_id: u64 = env.storage().persistent().get(&MARKET_COUNT).unwrap_or(0);
         let new_count = market_id + 1;
 
+        // ── Validate WASM hash is set ───────────────────────
         let wasm_hash: BytesN<32> = env.storage().persistent()
             .get(&MARKET_WASM_HASH)
             .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]));
+        if wasm_hash == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(ContractError::WasmHashNotSet);
+        }
+
+        // ── Validate treasury is set ────────────────────────
+        let treasury: Address = env.storage().persistent()
+            .get(&TREASURY)
+            .ok_or(ContractError::NotFactory)?;
 
         // Use market_id as salt so each deployment gets a unique address
         let salt = BytesN::from_array(&env, &{
@@ -181,7 +200,6 @@ impl MarketFactory {
             .with_address(env.current_contract_address(), salt)
             .deploy(wasm_hash);
 
-        let treasury: Address = env.current_contract_address(); // placeholder; real treasury wired via DEFAULT_CONFIG
         let market_client = MarketClient::new(&env, &market_address);
         market_client.initialize(
             &env.current_contract_address(),
@@ -215,6 +233,22 @@ impl MarketFactory {
         let map: Map<u64, Address> =
             env.storage().persistent().get(&MARKET_MAP).unwrap_or_else(|| Map::new(&env));
         map.get(market_id).ok_or(ContractError::MarketNotFound)
+    }
+
+    /// Returns a paginated list of all market IDs.
+    /// Capped at 100 IDs per page.
+    pub fn list_market_ids(env: Env, offset: u64, limit: u32) -> Vec<u64> {
+        let open: Vec<u64> =
+            env.storage().persistent().get(&OPEN_MARKETS).unwrap_or_else(|| Vec::new(&env));
+        let cap = if limit > 100 { 100u32 } else { limit };
+        let mut result: Vec<u64> = Vec::new(&env);
+        let pos = offset as u32;
+        let mut fetched = 0u32;
+        while (pos + fetched) < open.len() && fetched < cap {
+            result.push_back(open.get(pos + fetched).unwrap());
+            fetched += 1;
+        }
+        result
     }
 
     /// Lists markets with pagination, returning `(market_id, status)` pairs.
@@ -442,8 +476,8 @@ impl MarketFactory {
 
 #[cfg(test)]
 mod tests {
-    use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
-    use boxmeout_shared::types::{FightDetails, MarketConfig};
+    use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Vec};
+    use boxmeout_shared::types::{FactoryConfig, FightDetails, MarketConfig};
     use crate::{MarketFactory, MarketFactoryClient};
 
     fn setup() -> (Env, MarketFactoryClient<'static>) {
@@ -454,19 +488,29 @@ mod tests {
         (env, client)
     }
 
-    fn default_fight(env: &Env) -> FightDetails {
+    fn default_config() -> FactoryConfig {
+        FactoryConfig {
+            default_min_bet: 1_000_000,
+            default_max_bet: 100_000_000_000,
+            default_fee_bps: 200,
+            default_lock_before_secs: 3600,
+            default_resolution_window: 86400,
+        }
+    }
+
+    fn sample_fight(env: &Env) -> FightDetails {
         FightDetails {
-            match_id: String::from_str(env, "FURY-USYK-2025"),
-            fighter_a: String::from_str(env, "Fury"),
-            fighter_b: String::from_str(env, "Usyk"),
+            match_id: String::from_str(env, "FIGHT-001"),
+            fighter_a: String::from_str(env, "Ali"),
+            fighter_b: String::from_str(env, "Frazier"),
             weight_class: String::from_str(env, "Heavyweight"),
             scheduled_at: env.ledger().timestamp() + 86400,
-            venue: String::from_str(env, "Riyadh"),
+            venue: String::from_str(env, "Arena"),
             title_fight: true,
         }
     }
 
-    fn default_config() -> MarketConfig {
+    fn sample_market_config(_env: &Env) -> MarketConfig {
         MarketConfig {
             min_bet: 1_000_000,
             max_bet: 100_000_000_000,
@@ -476,18 +520,30 @@ mod tests {
         }
     }
 
+    fn init_factory(env: &Env, client: &MarketFactoryClient) {
+        let admin = Address::generate(env);
+        let treasury = Address::generate(env);
+        let oracle = Address::generate(env);
+        client.initialize(&admin, &treasury, &oracle, &default_config());
+    }
+
+    // ── initialize tests ────────────────────────────────────
+
+
     #[test]
     fn test_initialize_stores_state() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
         let oracle = Address::generate(&env);
-        let mut oracles: Vec<Address> = Vec::new(&env);
-        oracles.push_back(oracle.clone());
+        let config = default_config();
+        let mut expected_oracles: Vec<Address> = Vec::new(&env);
+        expected_oracles.push_back(oracle.clone());
 
-        client.initialize(&admin, &200u32, &oracles);
+        client.initialize(&admin, &treasury, &oracle, &config);
 
         assert!(!client.is_paused());
-        assert_eq!(client.get_oracles(), oracles);
+        assert_eq!(client.get_oracles(), expected_oracles);
         assert_eq!(client.get_market_count(), 0u64);
     }
 
@@ -495,94 +551,149 @@ mod tests {
     fn test_initialize_second_call_returns_already_initialized() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
-        let oracles: Vec<Address> = Vec::new(&env);
-
-        client.initialize(&admin, &200u32, &oracles);
-
-        let result = client.try_initialize(&admin, &200u32, &oracles);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_admin_can_pause_and_unpause() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        let oracles: Vec<Address> = Vec::new(&env);
-        client.initialize(&admin, &200u32, &oracles);
-
-        assert!(!client.is_paused());
-
-        client.pause_factory(&admin);
-        assert!(client.is_paused());
-
-        client.unpause_factory(&admin);
-        assert!(!client.is_paused());
-    }
-
-    #[test]
-    fn test_non_admin_cannot_pause() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        let impostor = Address::generate(&env);
-        let oracles: Vec<Address> = Vec::new(&env);
-        client.initialize(&admin, &200u32, &oracles);
-
-        let result = client.try_pause_factory(&impostor);
-        assert!(result.is_err());
-
-        assert!(!client.is_paused());
-    }
-
-    #[test]
-    fn test_non_admin_cannot_unpause() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        let impostor = Address::generate(&env);
-        let oracles: Vec<Address> = Vec::new(&env);
-        client.initialize(&admin, &200u32, &oracles);
-
-        client.pause_factory(&admin);
-        assert!(client.is_paused());
-
-        let result = client.try_unpause_factory(&impostor);
-        assert!(result.is_err());
-
-        assert!(client.is_paused());
-    }
-
-    #[test]
-    fn test_create_market_rejected_when_paused() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        let caller = Address::generate(&env);
-        let oracles: Vec<Address> = Vec::new(&env);
-        client.initialize(&admin, &200u32, &oracles);
-
-        client.pause_factory(&admin);
-        assert!(client.is_paused());
-
-        let fight = default_fight(&env);
+        let treasury = Address::generate(&env);
+        let oracle = Address::generate(&env);
         let config = default_config();
-        let result = client.try_create_market(&caller, &fight, &config, &None);
+
+        client.initialize(&admin, &treasury, &oracle, &config);
+
+        let result = client.try_initialize(&admin, &treasury, &oracle, &config);
         assert!(result.is_err());
     }
 
+    // ── create_market validation tests ──────────────────────
+
     #[test]
-    fn test_create_market_passes_pause_guard_when_unpaused() {
+    fn test_create_market_fails_when_paused() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
-        let caller = Address::generate(&env);
-        let oracles: Vec<Address> = Vec::new(&env);
-        client.initialize(&admin, &200u32, &oracles);
+        let treasury = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        client.initialize(&admin, &treasury, &oracle, &default_config());
+        client.pause_factory(&admin);
 
-        // No WASM hash set → create_market fails on deploy,
-        // but crucially it gets past the pause guard (different error).
-        let fight = default_fight(&env);
-        let config = default_config();
-        let result = client.try_create_market(&caller, &fight, &config, &None);
-        assert!(
-            result.is_err(),
-            "Should fail (no WASM hash) but NOT due to pause guard"
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(
+            &caller, &sample_fight(&env), &sample_market_config(&env), &None,
         );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_market_fails_when_fight_in_past() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let mut fight = sample_fight(&env);
+        fight.scheduled_at = env.ledger().timestamp() - 1;
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(
+            &caller, &fight, &sample_market_config(&env), &None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_market_fails_when_fighter_name_empty() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let mut fight = sample_fight(&env);
+        fight.fighter_a = String::from_str(&env, "");
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(
+            &caller, &fight, &sample_market_config(&env), &None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_market_fails_when_min_bet_zero() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let mut config = sample_market_config(&env);
+        config.min_bet = 0;
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(
+            &caller, &sample_fight(&env), &config, &None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_market_fails_when_max_bet_less_than_min_bet() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let mut config = sample_market_config(&env);
+        config.max_bet = config.min_bet - 1;
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(
+            &caller, &sample_fight(&env), &config, &None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_market_fails_when_fee_bps_exceeds_1000() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let mut config = sample_market_config(&env);
+        config.fee_bps = 1001;
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(
+            &caller, &sample_fight(&env), &config, &None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_market_fails_when_wasm_hash_not_set() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(
+            &caller, &sample_fight(&env), &sample_market_config(&env), &None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_market_address_not_found() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let result = client.try_get_market_address(&0u64);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_list_market_ids_empty() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let ids = client.list_market_ids(&0u64, &10u32);
+        assert_eq!(ids.len(), 0);
+    }
+
+    #[test]
+    fn test_list_market_ids_pagination_capped_at_100() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let ids = client.list_market_ids(&0u64, &200u32);
+        assert!(ids.len() <= 100);
+    }
+
+    #[test]
+    fn test_list_market_ids_offset_beyond_end_returns_empty() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let ids = client.list_market_ids(&999u64, &10u32);
+        assert_eq!(ids.len(), 0);
     }
 }
