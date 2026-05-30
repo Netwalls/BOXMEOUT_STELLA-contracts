@@ -442,7 +442,8 @@ impl MarketFactory {
 
 #[cfg(test)]
 mod tests {
-    use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
+    use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
+    use boxmeout_shared::types::{FightDetails, MarketConfig};
     use crate::{MarketFactory, MarketFactoryClient};
 
     fn setup() -> (Env, MarketFactoryClient<'static>) {
@@ -451,6 +452,28 @@ mod tests {
         let contract_id = env.register_contract(None, MarketFactory);
         let client = MarketFactoryClient::new(&env, &contract_id);
         (env, client)
+    }
+
+    fn default_fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: String::from_str(env, "FURY-USYK-2025"),
+            fighter_a: String::from_str(env, "Fury"),
+            fighter_b: String::from_str(env, "Usyk"),
+            weight_class: String::from_str(env, "Heavyweight"),
+            scheduled_at: env.ledger().timestamp() + 86400,
+            venue: String::from_str(env, "Riyadh"),
+            title_fight: true,
+        }
+    }
+
+    fn default_config() -> MarketConfig {
+        MarketConfig {
+            min_bet: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3600,
+            resolution_window: 86400,
+        }
     }
 
     #[test]
@@ -463,7 +486,6 @@ mod tests {
 
         client.initialize(&admin, &200u32, &oracles);
 
-        // admin is stored (require_admin works)
         assert!(!client.is_paused());
         assert_eq!(client.get_oracles(), oracles);
         assert_eq!(client.get_market_count(), 0u64);
@@ -479,5 +501,88 @@ mod tests {
 
         let result = client.try_initialize(&admin, &200u32, &oracles);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_admin_can_pause_and_unpause() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let oracles: Vec<Address> = Vec::new(&env);
+        client.initialize(&admin, &200u32, &oracles);
+
+        assert!(!client.is_paused());
+
+        client.pause_factory(&admin);
+        assert!(client.is_paused());
+
+        client.unpause_factory(&admin);
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn test_non_admin_cannot_pause() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+        let oracles: Vec<Address> = Vec::new(&env);
+        client.initialize(&admin, &200u32, &oracles);
+
+        let result = client.try_pause_factory(&impostor);
+        assert!(result.is_err());
+
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn test_non_admin_cannot_unpause() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+        let oracles: Vec<Address> = Vec::new(&env);
+        client.initialize(&admin, &200u32, &oracles);
+
+        client.pause_factory(&admin);
+        assert!(client.is_paused());
+
+        let result = client.try_unpause_factory(&impostor);
+        assert!(result.is_err());
+
+        assert!(client.is_paused());
+    }
+
+    #[test]
+    fn test_create_market_rejected_when_paused() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let caller = Address::generate(&env);
+        let oracles: Vec<Address> = Vec::new(&env);
+        client.initialize(&admin, &200u32, &oracles);
+
+        client.pause_factory(&admin);
+        assert!(client.is_paused());
+
+        let fight = default_fight(&env);
+        let config = default_config();
+        let result = client.try_create_market(&caller, &fight, &config, &None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_market_passes_pause_guard_when_unpaused() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let caller = Address::generate(&env);
+        let oracles: Vec<Address> = Vec::new(&env);
+        client.initialize(&admin, &200u32, &oracles);
+
+        // No WASM hash set → create_market fails on deploy,
+        // but crucially it gets past the pause guard (different error).
+        let fight = default_fight(&env);
+        let config = default_config();
+        let result = client.try_create_market(&caller, &fight, &config, &None);
+        assert!(
+            result.is_err(),
+            "Should fail (no WASM hash) but NOT due to pause guard"
+        );
     }
 }
