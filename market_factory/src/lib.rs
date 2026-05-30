@@ -7,7 +7,7 @@ use soroban_sdk::{contract, contractimpl, contractclient, Address, Env, Vec, Map
 
 use boxmeout_shared::{
     errors::ContractError,
-    types::{BetRecord, MarketConfig, MarketState, MarketStatus, FightDetails, UserPosition},
+    types::{BetRecord, FactoryConfig, MarketConfig, MarketState, MarketStatus, FightDetails, UserPosition},
 };
 
 const MARKET_COUNT: &str    = "MARKET_COUNT";
@@ -16,6 +16,7 @@ const ADMIN: &str           = "ADMIN";
 const ORACLE_WHITELIST: &str = "ORACLE_WHITELIST";
 const PAUSED: &str          = "PAUSED";
 const DEFAULT_CONFIG: &str  = "DEFAULT_CONFIG";
+const TREASURY: &str        = "TREASURY";
 const MARKET_WASM_HASH: &str = "MARKET_WASM_HASH";
 
 #[contractclient(name = "MarketClient")]
@@ -58,15 +59,16 @@ impl MarketFactory {
 
 #[contractimpl]
 impl MarketFactory {
-    /// Initializes the factory with admin, default fee, and oracle whitelist.
+    /// Initializes the factory with admin, treasury, primary oracle, and factory config.
     ///
     /// # Errors
     /// - `AlreadyInitialized`: Factory has already been initialized
     pub fn initialize(
         env: Env,
         admin: Address,
-        default_fee_bps: u32,
-        oracles: Vec<Address>,
+        treasury: Address,
+        oracle: Address,
+        config: FactoryConfig,
     ) -> Result<(), ContractError> {
         // CHECKS
         if env.storage().persistent().has(&ADMIN) {
@@ -74,20 +76,25 @@ impl MarketFactory {
         }
         // EFFECTS
         env.storage().persistent().set(&ADMIN, &admin);
+        env.storage().persistent().set(&TREASURY, &treasury);
+
+        let mut oracles: Vec<Address> = Vec::new(&env);
+        oracles.push_back(oracle);
         env.storage().persistent().set(&ORACLE_WHITELIST, &oracles);
+
         env.storage().persistent().set(&PAUSED, &false);
         env.storage().persistent().set(&MARKET_COUNT, &0u64);
         env.storage().persistent().set(&MARKET_MAP, &Map::<u64, Address>::new(&env));
 
         let default_config = MarketConfig {
-            min_bet: 1_000_000,          // 0.1 XLM
-            max_bet: 100_000_000_000,    // 10,000 XLM
-            fee_bps: default_fee_bps,
-            lock_before_secs: 3600,      // 1 hour
-            resolution_window: 86400,    // 24 hours
+            min_bet: config.default_min_bet,
+            max_bet: config.default_max_bet,
+            fee_bps: config.default_fee_bps,
+            lock_before_secs: config.default_lock_before_secs,
+            resolution_window: config.default_resolution_window,
         };
         env.storage().persistent().set(&DEFAULT_CONFIG, &default_config);
-        
+
         // Initialize with zero hash; admin must call update_market_wasm to set it
         let zero_hash: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
         env.storage().persistent().set(&MARKET_WASM_HASH, &zero_hash);
@@ -162,7 +169,9 @@ impl MarketFactory {
             .with_address(env.current_contract_address(), salt)
             .deploy(wasm_hash);
 
-        let treasury: Address = env.current_contract_address(); // placeholder; real treasury wired via DEFAULT_CONFIG
+        let treasury: Address = env.storage().persistent()
+            .get(&TREASURY)
+            .expect("treasury not initialized");
         let market_client = MarketClient::new(&env, &market_address);
         market_client.initialize(
             &env.current_contract_address(),
@@ -369,6 +378,7 @@ impl MarketFactory {
 #[cfg(test)]
 mod tests {
     use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
+    use boxmeout_shared::types::FactoryConfig;
     use crate::{MarketFactory, MarketFactoryClient};
 
     fn setup() -> (Env, MarketFactoryClient<'static>) {
@@ -379,19 +389,30 @@ mod tests {
         (env, client)
     }
 
+    fn default_config() -> FactoryConfig {
+        FactoryConfig {
+            default_min_bet: 1_000_000,
+            default_max_bet: 100_000_000_000,
+            default_fee_bps: 200,
+            default_lock_before_secs: 3600,
+            default_resolution_window: 86400,
+        }
+    }
+
     #[test]
     fn test_initialize_stores_state() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
         let oracle = Address::generate(&env);
-        let mut oracles: Vec<Address> = Vec::new(&env);
-        oracles.push_back(oracle.clone());
+        let config = default_config();
+        let mut expected_oracles: Vec<Address> = Vec::new(&env);
+        expected_oracles.push_back(oracle.clone());
 
-        client.initialize(&admin, &200u32, &oracles);
+        client.initialize(&admin, &treasury, &oracle, &config);
 
-        // admin is stored (require_admin works)
         assert!(!client.is_paused());
-        assert_eq!(client.get_oracles(), oracles);
+        assert_eq!(client.get_oracles(), expected_oracles);
         assert_eq!(client.get_market_count(), 0u64);
     }
 
@@ -399,11 +420,13 @@ mod tests {
     fn test_initialize_second_call_returns_already_initialized() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
-        let oracles: Vec<Address> = Vec::new(&env);
+        let treasury = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let config = default_config();
 
-        client.initialize(&admin, &200u32, &oracles);
+        client.initialize(&admin, &treasury, &oracle, &config);
 
-        let result = client.try_initialize(&admin, &200u32, &oracles);
+        let result = client.try_initialize(&admin, &treasury, &oracle, &config);
         assert!(result.is_err());
     }
 }
