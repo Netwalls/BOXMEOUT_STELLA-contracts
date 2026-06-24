@@ -1,0 +1,75 @@
+use soroban_sdk::{contracttype, Address, Bytes, String};
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum MarketStatus {
+    Open,
+    Locked,
+    Resolved,
+    Cancelled,
+    Disputed,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Outcome {
+    FighterA,
+    FighterB,
+    Draw,
+    NoContest,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum BetSide {
+    FighterA,
+    FighterB,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Fighter {
+    pub name: String,
+    pub record: String,
+    pub nationality: String,
+    pub weight_class: String,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Market {
+    pub market_id: Bytes,
+    pub fighter_a: Fighter,
+    pub fighter_b: Fighter,
+    pub scheduled_at: u64,
+    pub betting_ends_at: u64,
+    pub created_at: u64,
+    pub created_by: Address,
+    pub status: MarketStatus,
+    pub pool_a: i128,
+    pub pool_b: i128,
+    pub total_pool: i128,
+    pub protocol_fee_bp: u32,
+    pub oracle_address: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Bet {
+    pub bet_id: Bytes,
+    pub market_id: Bytes,
+    pub bettor: Address,
+    pub side: BetSide,
+    pub amount: i128,
+    pub placed_at: u64,
+    pub claimed: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ClaimReceipt {
+    pub bet_id: Bytes,
+    pub bettor: Address,
+    pub payout: i128,
+    pub claimed_at: u64,
+}
