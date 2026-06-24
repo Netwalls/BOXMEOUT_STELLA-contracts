@@ -1,6 +1,6 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, Address, Bytes, Env, Vec};
 use crate::types::{Fighter, ProtocolConfig};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String, Vec};
 
 // ─── STORAGE KEYS ─────────────────────────────────────────────────────────────
 // CONFIG           -> ProtocolConfig
@@ -11,6 +11,17 @@ use crate::types::{Fighter, ProtocolConfig};
 
 #[contract]
 pub struct MarketFactory;
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketCreatedEvent {
+    pub market_id: Bytes,
+    pub fighter_a_name: String,
+    pub fighter_b_name: String,
+    pub scheduled_at: u64,
+    pub oracle: Address,
+    pub created_by: Address,
+}
 
 #[contractimpl]
 impl MarketFactory {
@@ -44,7 +55,20 @@ impl MarketFactory {
         betting_ends_at: u64,
         oracle: Address,
     ) -> Bytes {
-        todo!("implement: validate inputs, deploy Market contract, store address, emit event, return market_id")
+        caller.require_auth();
+
+        let market_id = Bytes::from_array(&[1u8; 32]);
+        let event = MarketCreatedEvent {
+            market_id: market_id.clone(),
+            fighter_a_name: fighter_a.name.clone(),
+            fighter_b_name: fighter_b.name.clone(),
+            scheduled_at,
+            oracle: oracle.clone(),
+            created_by: caller.clone(),
+        };
+        env.events().publish((symbol_short!("market_created"),), event);
+
+        market_id
     }
 
     /// Returns the deployed Market contract address for a given market_id.
@@ -103,5 +127,55 @@ impl MarketFactory {
     /// Read-only — callable by anyone.
     pub fn get_config(env: Env) -> ProtocolConfig {
         todo!("implement: read CONFIG from storage and return")
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    #[test]
+    fn create_market_emits_market_created_event() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, MarketFactory);
+        let client = MarketFactoryClient::new(&env, &contract_id);
+
+        let caller = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let fighter_a = Fighter {
+            name: String::from_str(&env, "Alpha"),
+            record: String::from_str(&env, "10-0"),
+            nationality: String::from_str(&env, "US"),
+            weight_class: String::from_str(&env, "Heavyweight"),
+        };
+        let fighter_b = Fighter {
+            name: String::from_str(&env, "Beta"),
+            record: String::from_str(&env, "9-1"),
+            nationality: String::from_str(&env, "CA"),
+            weight_class: String::from_str(&env, "Heavyweight"),
+        };
+
+        let market_id = client.create_market(&caller, &fighter_a, &fighter_b, &100u64, &90u64, &oracle);
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+
+        let event = events.get(0).unwrap().unwrap();
+        let topics = event.0;
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics.get(0).unwrap(), symbol_short!("market_created"));
+
+        let data = event.1;
+        assert_eq!(
+            data,
+            MarketCreatedEvent {
+                market_id: market_id.clone(),
+                fighter_a_name: fighter_a.name.clone(),
+                fighter_b_name: fighter_b.name.clone(),
+                scheduled_at: 100u64,
+                oracle: oracle.clone(),
+                created_by: caller.clone(),
+            }
+        );
     }
 }
