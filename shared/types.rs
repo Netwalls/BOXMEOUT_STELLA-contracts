@@ -80,6 +80,14 @@ pub struct ClaimReceipt {
 
 #[contracttype]
 #[derive(Clone, Debug)]
+pub struct MarketResolved {
+    pub market_id:  Bytes,
+    pub outcome:    Outcome,
+    pub resolved_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct WinningsClaimed {
     pub bet_id:     Bytes,
     pub bettor:     Address,

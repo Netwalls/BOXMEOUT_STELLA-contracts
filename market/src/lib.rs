@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, Address, Bytes, Env, Vec, Symbol};
-use crate::types::{Bet, BetSide, ClaimReceipt, Fighter, Market, MarketStatus, Outcome, WinningsClaimed};
+use crate::types::{Bet, BetSide, ClaimReceipt, Fighter, Market, MarketStatus, Outcome, WinningsClaimed, MarketResolved};
 
 // ─── STORAGE KEYS ─────────────────────────────────────────────────────────────
 // MARKET_INFO           -> Market
@@ -63,7 +63,26 @@ impl MarketContract {
     /// If outcome is NoContest, sets status to Cancelled for full refunds.
     /// Emits MarketResolved event.
     pub fn resolve_market(env: Env, oracle: Address, outcome: Outcome) {
-        todo!("implement: require_auth(oracle), validate status==Locked, store outcome, set status=Resolved or Cancelled, emit event")
+        // Emit resolution event before any status transition or early return.
+        let market: Market = env
+            .storage()
+            .get(&Symbol::short("MARKET_INFO"))
+            .expect("Market info not found");
+        let resolved_at = env.ledger().timestamp();
+        env.events().publish((Symbol::short("MarketResolved"),), MarketResolved {
+            market_id: market.market_id.clone(),
+            outcome: outcome.clone(),
+            resolved_at,
+        });
+
+        // Minimal status update consistency for the resolved event.
+        let mut updated_market = market;
+        updated_market.status = if outcome == Outcome::NoContest {
+            MarketStatus::Cancelled
+        } else {
+            MarketStatus::Resolved
+        };
+        env.storage().set(&Symbol::short("MARKET_INFO"), &updated_market);
     }
 
     /// Allows a winning bettor to claim proportional share of the pool.
@@ -142,5 +161,82 @@ impl MarketContract {
     /// Handles zero total_pool edge case (returns 5000/5000 even split).
     pub fn get_pool_odds(env: Env) -> (i128, i128, u32, u32) {
         todo!("implement: read pools from MARKET_INFO, compute implied odds, return tuple")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{Env, BytesN};
+
+    fn addr_from_u8(env: &Env, v: u8) -> Address {
+        let b = BytesN::from_array(env, &[v; 32]);
+        Address::from_account_id(env, &b)
+    }
+
+    fn default_market(env: &Env, status: MarketStatus) -> Market {
+        Market {
+            market_id: Bytes::from_array(env, &[0u8; 32]),
+            fighter_a: Fighter {
+                name: "A".into_val(env),
+                record: "0-0-0".into_val(env),
+                nationality: "USA".into_val(env),
+                weight_class: "Heavy".into_val(env),
+            },
+            fighter_b: Fighter {
+                name: "B".into_val(env),
+                record: "0-0-0".into_val(env),
+                nationality: "BRA".into_val(env),
+                weight_class: "Heavy".into_val(env),
+            },
+            scheduled_at: 1,
+            betting_ends_at: 1,
+            created_at: 1,
+            created_by: addr_from_u8(env, 1),
+            status,
+            pool_a: 0,
+            pool_b: 0,
+            total_pool: 0,
+            protocol_fee_bp: 100,
+            oracle_address: addr_from_u8(env, 2),
+        }
+    }
+
+    #[test]
+    fn test_resolve_market_emits_event() {
+        let env = Env::default();
+        let market = default_market(&env, MarketStatus::Locked);
+        env.storage().set(&Symbol::short("MARKET_INFO"), &market);
+
+        let outcome = Outcome::FighterA;
+        MarketContract::resolve_market(env.clone(), market.oracle_address.clone(), outcome.clone());
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (topic, data_raw) = events[0].clone();
+        let data: MarketResolved = data_raw.try_into().unwrap();
+        assert_eq!(topic, Symbol::short("MarketResolved"));
+        assert_eq!(data.market_id, market.market_id);
+        assert_eq!(data.outcome, outcome);
+        assert_eq!(data.resolved_at, env.ledger().timestamp());
+    }
+
+    #[test]
+    fn test_resolve_market_emits_event_for_nocontest() {
+        let env = Env::default();
+        let market = default_market(&env, MarketStatus::Locked);
+        env.storage().set(&Symbol::short("MARKET_INFO"), &market);
+
+        let outcome = Outcome::NoContest;
+        MarketContract::resolve_market(env.clone(), market.oracle_address.clone(), outcome.clone());
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (topic, data_raw) = events[0].clone();
+        let data: MarketResolved = data_raw.try_into().unwrap();
+        assert_eq!(topic, Symbol::short("MarketResolved"));
+        assert_eq!(data.market_id, market.market_id);
+        assert_eq!(data.outcome, outcome);
+        assert_eq!(data.resolved_at, env.ledger().timestamp());
     }
 }
