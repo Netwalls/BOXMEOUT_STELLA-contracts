@@ -1,6 +1,11 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, Address, Bytes, Env, Vec, Symbol};
 use crate::types::{Bet, BetSide, ClaimReceipt, Fighter, Market, MarketStatus, Outcome, WinningsClaimed, MarketResolved};
+use crate::types::{Bet, BetSide, ClaimReceipt, Fighter, Market, MarketStatus, Outcome};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String, Vec};
+
+const MARKET_INFO_KEY: &str = "market_info";
+const NEXT_BET_ID_KEY: &str = "next_bet_id";
 
 // ─── STORAGE KEYS ─────────────────────────────────────────────────────────────
 // MARKET_INFO           -> Market
@@ -13,8 +18,34 @@ use crate::types::{Bet, BetSide, ClaimReceipt, Fighter, Market, MarketStatus, Ou
 #[contract]
 pub struct MarketContract;
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BetPlacedEvent {
+    pub bet_id: Bytes,
+    pub market_id: Bytes,
+    pub bettor: Address,
+    pub side: BetSide,
+    pub amount: i128,
+    pub placed_at: u64,
+}
+
 #[contractimpl]
 impl MarketContract {
+    fn read_market(env: &Env) -> Market {
+        env.storage().persistent().get(&MARKET_INFO_KEY).unwrap().unwrap()
+    }
+
+    fn write_market(env: &Env, market: &Market) {
+        env.storage().persistent().set(&MARKET_INFO_KEY, market);
+    }
+
+    fn read_next_bet_id(env: &Env) -> u64 {
+        env.storage().persistent().get(&NEXT_BET_ID_KEY).unwrap_or(1u64)
+    }
+
+    fn write_next_bet_id(env: &Env, id: u64) {
+        env.storage().persistent().set(&NEXT_BET_ID_KEY, &id);
+    }
 
     /// Called by MarketFactory immediately after contract deployment.
     /// Stores all market metadata and initializes pool values to 0.
@@ -31,7 +62,24 @@ impl MarketContract {
         protocol_fee_bp: u32,
         fee_collector: Address,
     ) {
-        todo!("implement: verify caller == factory, build Market struct, store MARKET_INFO with status=Open")
+        let _ = (factory, fee_collector, protocol_fee_bp);
+        let market = Market {
+            market_id: market_id.clone(),
+            fighter_a,
+            fighter_b,
+            scheduled_at,
+            betting_ends_at,
+            created_at: env.ledger().timestamp(),
+            created_by: env.current_contract_address(),
+            status: MarketStatus::Open,
+            pool_a: 0,
+            pool_b: 0,
+            total_pool: 0,
+            protocol_fee_bp,
+            oracle_address: oracle,
+        };
+        env.storage().persistent().set(&MARKET_INFO_KEY, &market);
+        env.storage().persistent().set(&NEXT_BET_ID_KEY, &1u64);
     }
 
     /// Accepts XLM from bettor and records their bet in contract storage.
@@ -46,7 +94,49 @@ impl MarketContract {
         side: BetSide,
         amount: i128,
     ) -> Bytes {
-        todo!("implement: require_auth(bettor), validate market/timing/amount, transfer XLM, update pool, generate bet_id, store Bet, emit event")
+        bettor.require_auth();
+
+        let mut market = Self::read_market(&env);
+        assert!(matches!(market.status, MarketStatus::Open));
+        assert!(env.ledger().timestamp() < market.betting_ends_at);
+        assert!(amount > 0);
+
+        if matches!(side, BetSide::FighterA) {
+            market.pool_a += amount;
+        } else {
+            market.pool_b += amount;
+        }
+        market.total_pool += amount;
+
+        let next_bet_id = Self::read_next_bet_id(&env);
+        let mut bet_id_bytes = [0u8; 32];
+        bet_id_bytes[..8].copy_from_slice(&next_bet_id.to_be_bytes());
+        let bet_id = Bytes::from_array(&bet_id_bytes);
+
+        let bet = Bet {
+            bet_id: bet_id.clone(),
+            market_id: market.market_id.clone(),
+            bettor: bettor.clone(),
+            side: side.clone(),
+            amount,
+            placed_at: env.ledger().timestamp(),
+            claimed: false,
+        };
+        env.storage().persistent().set(&bet_id, &bet);
+        Self::write_market(&env, &market);
+        Self::write_next_bet_id(&env, next_bet_id + 1);
+
+        let event = BetPlacedEvent {
+            bet_id: bet_id.clone(),
+            market_id: market.market_id.clone(),
+            bettor: bettor.clone(),
+            side: side.clone(),
+            amount,
+            placed_at: env.ledger().timestamp(),
+        };
+        env.events().publish((symbol_short!("bet_placed"),), event);
+
+        bet_id
     }
 
     /// Transitions market status from Open to Locked.
@@ -54,6 +144,7 @@ impl MarketContract {
     /// After locking, no new bets are accepted.
     /// Emits MarketLocked event.
     pub fn lock_market(env: Env, oracle: Address) {
+        let _ = (env, oracle);
         todo!("implement: verify caller==oracle OR ledger time > betting_ends_at, set status=Locked, emit event")
     }
 
@@ -83,6 +174,8 @@ impl MarketContract {
             MarketStatus::Resolved
         };
         env.storage().set(&Symbol::short("MARKET_INFO"), &updated_market);
+        let _ = (env, oracle, outcome);
+        todo!("implement: require_auth(oracle), validate status==Locked, store outcome, set status=Resolved or Cancelled, emit event")
     }
 
     /// Allows a winning bettor to claim proportional share of the pool.
@@ -105,6 +198,8 @@ impl MarketContract {
             claimed_at,
         });
         payout
+        let _ = (env, bettor, bet_id);
+        todo!("implement: require_auth(bettor), validate eligibility, mark claimed BEFORE transfer (re-entrancy guard), compute payout, transfer XLM, emit event")
     }
 
     /// Issues a full refund for a bet when market is Cancelled or outcome is NoContest.
@@ -112,6 +207,7 @@ impl MarketContract {
     /// Validates: status==Cancelled or outcome==NoContest, bettor owns bet, not claimed.
     /// Emits RefundClaimed event. Returns refund amount.
     pub fn claim_refund(env: Env, bettor: Address, bet_id: Bytes) -> i128 {
+        let _ = (env, bettor, bet_id);
         todo!("implement: require_auth(bettor), validate market state, mark claimed BEFORE transfer, return full bet.amount, emit event")
     }
 
@@ -121,6 +217,7 @@ impl MarketContract {
     /// Only one active dispute allowed per market.
     /// Emits DisputeRaised event.
     pub fn raise_dispute(env: Env, bettor: Address, reason: Bytes) {
+        let _ = (env, bettor, reason);
         todo!("implement: require_auth(bettor), verify bettor has a bet on this market, check within window, check no existing dispute, set status=Disputed, store reason")
     }
 
@@ -129,23 +226,27 @@ impl MarketContract {
     /// Transitions status back to Resolved. Claims re-open with new outcome.
     /// Emits DisputeResolved event.
     pub fn resolve_dispute(env: Env, admin: Address, override_outcome: Outcome) {
+        let _ = (env, admin, override_outcome);
         todo!("implement: require_auth(admin), validate status==Disputed, update outcome, set status=Resolved, emit event")
     }
 
     /// Read-only. Returns the full Market struct.
     pub fn get_market_info(env: Env) -> Market {
+        let _ = env;
         todo!("implement: read MARKET_INFO from storage and return")
     }
 
     /// Returns a specific Bet struct by its ID.
     /// Panics if bet_id is not found.
     pub fn get_bet(env: Env, bet_id: Bytes) -> Bet {
+        let _ = (env, bet_id);
         todo!("implement: read BET_{{bet_id}} from storage, panic if missing")
     }
 
     /// Returns all bets placed by a specific address on this market.
     /// Returns empty Vec if address has no bets.
     pub fn get_bets_by_address(env: Env, bettor: Address) -> Vec<Bet> {
+        let _ = (env, bettor);
         todo!("implement: read BETS_BY_ADDR_{{bettor}} for bet_ids, map to Bet structs, return vec")
     }
 
@@ -153,6 +254,7 @@ impl MarketContract {
     /// using current pool sizes. Does NOT modify state.
     /// Used by frontend to show live payout estimates before resolution.
     pub fn calculate_payout(env: Env, bet_id: Bytes) -> i128 {
+        let _ = (env, bet_id);
         todo!("implement: read bet + market pools, apply payout formula, return estimated payout")
     }
 
@@ -160,6 +262,7 @@ impl MarketContract {
     /// implied_odds = pool_side / total_pool expressed as basis points (0-10000).
     /// Handles zero total_pool edge case (returns 5000/5000 even split).
     pub fn get_pool_odds(env: Env) -> (i128, i128, u32, u32) {
+        let _ = env;
         todo!("implement: read pools from MARKET_INFO, compute implied odds, return tuple")
     }
 }
@@ -238,5 +341,63 @@ mod tests {
         assert_eq!(data.market_id, market.market_id);
         assert_eq!(data.outcome, outcome);
         assert_eq!(data.resolved_at, env.ledger().timestamp());
+mod test {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    #[test]
+    fn place_bet_emits_bet_placed_event() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, MarketContract);
+        let client = MarketContractClient::new(&env, &contract_id);
+
+        let bettor = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let fighter_a = Fighter {
+            name: String::from_str(&env, "A"),
+            record: String::from_str(&env, "10-0"),
+            nationality: String::from_str(&env, "US"),
+            weight_class: String::from_str(&env, "Heavyweight"),
+        };
+        let fighter_b = Fighter {
+            name: String::from_str(&env, "B"),
+            record: String::from_str(&env, "9-1"),
+            nationality: String::from_str(&env, "MX"),
+            weight_class: String::from_str(&env, "Heavyweight"),
+        };
+        let market_id = Bytes::from_array(&[1u8; 32]);
+        client.initialize(
+            &market_id,
+            &fighter_a,
+            &fighter_b,
+            &100u64,
+            &200u64,
+            &oracle,
+            &Address::generate(&env),
+            &0u32,
+            &Address::generate(&env),
+        );
+
+        let bet_id = client.place_bet(&bettor, &BetSide::FighterA, &100i128);
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+
+        let event = events.get(0).unwrap().unwrap();
+        let topics = event.0;
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics.get(0).unwrap(), symbol_short!("bet_placed"));
+
+        let data = event.1;
+        assert_eq!(
+            data,
+            BetPlacedEvent {
+                bet_id: bet_id.clone(),
+                market_id: market_id.clone(),
+                bettor: bettor.clone(),
+                side: BetSide::FighterA,
+                amount: 100i128,
+                placed_at: env.ledger().timestamp(),
+            }
+        );
     }
 }
