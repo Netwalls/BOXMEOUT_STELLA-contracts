@@ -80,6 +80,16 @@ pub struct ClaimReceipt {
 
 #[contracttype]
 #[derive(Clone, Debug)]
+pub struct WinningsClaimed {
+    pub bet_id:     Bytes,
+    pub bettor:     Address,
+    pub payout:     i128,
+    pub fee_paid:   i128,
+    pub claimed_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct ProtocolConfig {
     pub admin:              Address,
     pub fee_collector:      Address,
