@@ -90,6 +90,14 @@ pub struct WinningsClaimed {
 
 #[contracttype]
 #[derive(Clone, Debug)]
+pub struct FeesDeposited {
+    pub caller:    Address,
+    pub amount:    i128,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct ProtocolConfig {
     pub admin:              Address,
     pub fee_collector:      Address,
