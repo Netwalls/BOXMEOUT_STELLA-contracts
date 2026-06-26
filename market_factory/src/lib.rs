@@ -392,25 +392,27 @@ impl MarketFactory {
         Ok(())
     }
 
-    /// Pauses the factory, preventing new market creation.
+    /// Pauses the protocol, preventing new market creation and betting.
     ///
     /// # Errors
     /// - `Unauthorized`: Caller is not the admin
-    pub fn pause_factory(env: Env, admin: Address) -> Result<(), ContractError> {
+    pub fn pause_protocol(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         env.storage().persistent().set(&PAUSED, &true);
+        boxmeout_shared::emit_protocol_paused(&env);
         Ok(())
     }
 
-    /// Unpauses the factory, allowing new market creation.
+    /// Unpauses the protocol, allowing new market creation and betting.
     ///
     /// # Errors
     /// - `Unauthorized`: Caller is not the admin
-    pub fn unpause_factory(env: Env, admin: Address) -> Result<(), ContractError> {
+    pub fn unpause_protocol(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         env.storage().persistent().set(&PAUSED, &false);
+        boxmeout_shared::emit_protocol_unpaused(&env);
         Ok(())
     }
 
@@ -541,10 +543,10 @@ mod tests {
 
         assert!(!client.is_paused());
 
-        client.pause_factory(&admin);
+        client.pause_protocol(&admin);
         assert!(client.is_paused());
 
-        client.unpause_factory(&admin);
+        client.unpause_protocol(&admin);
         assert!(!client.is_paused());
     }
 
@@ -556,7 +558,7 @@ mod tests {
         let oracles: Vec<Address> = Vec::new(&env);
         client.initialize(&admin, &200u32, &oracles);
 
-        let result = client.try_pause_factory(&impostor);
+        let result = client.try_pause_protocol(&impostor);
         assert!(result.is_err());
 
         assert!(!client.is_paused());
@@ -570,10 +572,10 @@ mod tests {
         let oracles: Vec<Address> = Vec::new(&env);
         client.initialize(&admin, &200u32, &oracles);
 
-        client.pause_factory(&admin);
+        client.pause_protocol(&admin);
         assert!(client.is_paused());
 
-        let result = client.try_unpause_factory(&impostor);
+        let result = client.try_unpause_protocol(&impostor);
         assert!(result.is_err());
 
         assert!(client.is_paused());
@@ -587,7 +589,7 @@ mod tests {
         let oracles: Vec<Address> = Vec::new(&env);
         client.initialize(&admin, &200u32, &oracles);
 
-        client.pause_factory(&admin);
+        client.pause_protocol(&admin);
         assert!(client.is_paused());
 
         let fight = default_fight(&env);
@@ -636,4 +638,5 @@ mod tests {
         let result = client.get_markets_paginated(&100u64, &10u32);
         assert!(result.is_empty());
     }
+
 }

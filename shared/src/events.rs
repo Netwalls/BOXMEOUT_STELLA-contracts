@@ -147,6 +147,16 @@ pub fn emit_contract_upgraded(env: &Env, new_wasm_hash: soroban_sdk::BytesN<32>)
     env.events().publish(topics, new_wasm_hash);
 }
 
+pub fn emit_protocol_paused(env: &Env) {
+    let topics = (Symbol::new(env, "protocol_paused"),);
+    env.events().publish(topics, ());
+}
+
+pub fn emit_protocol_unpaused(env: &Env) {
+    let topics = (Symbol::new(env, "protocol_unpaused"),);
+    env.events().publish(topics, ());
+}
+
 #[cfg(test)]
 mod tests {
     use soroban_sdk::{
