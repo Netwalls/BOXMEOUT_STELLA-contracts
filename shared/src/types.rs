@@ -95,7 +95,20 @@ pub struct ProtocolConfig {
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 /// Compute protocol fee from a total amount and fee in basis points.
-/// Returns (amount * fee_bp) / 10_000.  Uses checked arithmetic to prevent overflow.
+///
+/// Formula: `(amount * fee_bp) / 10_000`
+///
+/// Uses `i128::checked_mul` and `i128::checked_div` so overflow or division
+/// by zero panics immediately rather than silently wrapping.
+///
+/// # Basis points reference
+/// | fee_bp | percentage |
+/// |--------|-----------|
+/// | 0      | 0%        |
+/// | 100    | 1%        |
+/// | 200    | 2%        |
+/// | 500    | 5%        |
+/// | 10_000 | 100%      |
 pub fn calculate_fee(amount: i128, fee_bp: u32) -> i128 {
     amount
         .checked_mul(fee_bp as i128)
@@ -110,10 +123,29 @@ pub fn calculate_fee(amount: i128, fee_bp: u32) -> i128 {
 mod tests {
     use super::calculate_fee;
 
+    // ── boundary values ───────────────────────────────────────────────────────
+
     #[test]
     fn fee_zero_bp_returns_zero() {
         assert_eq!(calculate_fee(1_000_000, 0), 0);
+        assert_eq!(calculate_fee(0, 0), 0);
+        assert_eq!(calculate_fee(i128::MAX / 10_001, 0), 0);
     }
+
+    #[test]
+    fn fee_10000_bp_returns_full_amount() {
+        let amount = 1_000_000_i128;
+        assert_eq!(calculate_fee(amount, 10_000), amount);
+    }
+
+    #[test]
+    fn fee_zero_amount_always_zero() {
+        assert_eq!(calculate_fee(0, 100), 0);
+        assert_eq!(calculate_fee(0, 500), 0);
+        assert_eq!(calculate_fee(0, 10_000), 0);
+    }
+
+    // ── representative fee rates ──────────────────────────────────────────────
 
     #[test]
     fn fee_100_bp_is_one_percent() {
@@ -130,15 +162,27 @@ mod tests {
         assert_eq!(calculate_fee(1_000_000, 500), 50_000);
     }
 
+    // ── truncation / rounding ─────────────────────────────────────────────────
+
     #[test]
-    fn fee_10000_bp_returns_full_amount() {
-        let amount = 1_000_000_i128;
-        assert_eq!(calculate_fee(amount, 10_000), amount);
+    fn fee_rounds_down_small_amount() {
+        // 1 stroop at 1% → 0.0001 stroops → truncates to 0
+        assert_eq!(calculate_fee(1, 100), 0);
     }
 
     #[test]
-    fn fee_rounds_down() {
-        // 1 stroop * 100 bp = 0 (truncated)
-        assert_eq!(calculate_fee(1, 100), 0);
+    fn fee_rounds_down_near_boundary() {
+        // 9_999 * 100 / 10_000 = 99.99 → 99
+        assert_eq!(calculate_fee(9_999, 100), 99);
+    }
+
+    // ── large but safe amounts ────────────────────────────────────────────────
+
+    #[test]
+    fn fee_large_amount_no_overflow() {
+        // 10 billion XLM in stroops = 100_000_000_000 * 10_000_000
+        let large = 100_000_000_000i128 * 10_000_000;
+        let fee   = calculate_fee(large, 200); // 2%
+        assert_eq!(fee, large * 200 / 10_000);
     }
 }
