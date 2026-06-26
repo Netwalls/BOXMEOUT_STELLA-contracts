@@ -269,19 +269,7 @@ impl Market {
     /// - `BettingClosed`: Lock threshold has not been reached yet
     pub fn lock_market(env: Env, caller: Address) -> Result<(), ContractError> {
         // CHECKS
-        caller.require_auth();
         Self::require_not_paused(&env)?;
-
-        // Caller must be a whitelisted oracle OR the factory admin
-        let factory: Address = env
-            .storage().persistent()
-            .get(&FACTORY)
-            .ok_or(ContractError::NotFactory)?;
-        let is_admin = caller == factory;
-        let is_oracle = Self::is_oracle_whitelisted(&env, &caller)?;
-        if !is_admin && !is_oracle {
-            return Err(ContractError::Unauthorized);
-        }
 
         let mut state = Self::load_state(&env)?;
         if state.status != MarketStatus::Open {
@@ -290,9 +278,22 @@ impl Market {
 
         let lock_threshold = state.fight.scheduled_at
             .saturating_sub(state.config.lock_before_secs);
-        if env.ledger().timestamp() < lock_threshold {
-            return Err(ContractError::BettingClosed);
+        let betting_ended = env.ledger().timestamp() >= lock_threshold;
+
+        if !betting_ended {
+            // Only oracle/admin can lock before betting has ended
+            caller.require_auth();
+            let factory: Address = env
+                .storage().persistent()
+                .get(&FACTORY)
+                .ok_or(ContractError::NotFactory)?;
+            let is_admin = caller == factory;
+            let is_oracle = Self::is_oracle_whitelisted(&env, &caller)?;
+            if !is_admin && !is_oracle {
+                return Err(ContractError::Unauthorized);
+            }
         }
+        // Anyone can lock (no auth) if betting has ended
 
         // EFFECTS
         state.status = MarketStatus::Locked;
