@@ -457,4 +457,116 @@ mod tests {
         let result = client.try_claim_refund(&bettor, &bet_id);
         assert!(result.is_err());
     }
+
+    /// Full Draw flow: resolve_market(Draw) sets status=Cancelled, both sides
+    /// can claim full refunds, and no fee is deducted from either bettor.
+    #[test]
+    fn test_draw_outcome_full_refund_both_sides() {
+        let env = create_test_env();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, MarketContract);
+        let client      = MarketContractClient::new(&env, &contract_id);
+        initialize_market(&env, &client);
+
+        let bettor_a    = create_test_address(&env);
+        let bettor_b    = create_test_address(&env);
+        let bet_id_a    = Bytes::from_array(&env, &[0xaau8; 32]);
+        let bet_id_b    = Bytes::from_array(&env, &[0xbbu8; 32]);
+        let amount_a    = 300_000i128;
+        let amount_b    = 700_000i128;
+        let oracle      = create_test_address(&env);
+
+        // Seed two bets and a Locked market directly in storage.
+        env.as_contract(&contract_id, || {
+            let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo).unwrap();
+            market.status     = MarketStatus::Locked;
+            market.pool_a     = amount_a;
+            market.pool_b     = amount_b;
+            market.total_pool = amount_a + amount_b;
+            market.oracle_address = oracle.clone();
+            env.storage().persistent().set(&DataKey::MarketInfo, &market);
+
+            let bet_a = Bet {
+                bet_id:    bet_id_a.clone(),
+                market_id: market.market_id.clone(),
+                bettor:    bettor_a.clone(),
+                side:      BetSide::FighterA,
+                amount:    amount_a,
+                placed_at: 0,
+                claimed:   false,
+            };
+            env.storage().persistent().set(&DataKey::Bet(bet_id_a.clone()), &bet_a);
+
+            let bet_b = Bet {
+                bet_id:    bet_id_b.clone(),
+                market_id: market.market_id.clone(),
+                bettor:    bettor_b.clone(),
+                side:      BetSide::FighterB,
+                amount:    amount_b,
+                placed_at: 0,
+                claimed:   false,
+            };
+            env.storage().persistent().set(&DataKey::Bet(bet_id_b.clone()), &bet_b);
+        });
+
+        // Resolving with Draw must flip status to Cancelled.
+        client.resolve_market(&oracle, &Outcome::Draw);
+
+        let market = client.get_market_info();
+        assert!(
+            matches!(market.status, MarketStatus::Cancelled),
+            "Draw outcome must set status to Cancelled"
+        );
+        assert!(matches!(market.outcome, Some(Outcome::Draw)));
+
+        // Both sides must receive full refunds with no fee.
+        let refund_a = client.claim_refund(&bettor_a, &bet_id_a);
+        let refund_b = client.claim_refund(&bettor_b, &bet_id_b);
+
+        assert_eq!(refund_a, amount_a, "bettor_a should receive full refund");
+        assert_eq!(refund_b, amount_b, "bettor_b should receive full refund");
+
+        // Neither bettor can claim again.
+        assert!(client.try_claim_refund(&bettor_a, &bet_id_a).is_err());
+        assert!(client.try_claim_refund(&bettor_b, &bet_id_b).is_err());
+    }
+
+    #[test]
+    fn test_draw_via_claim_winnings_rejected() {
+        // After a Draw, the market is Cancelled so claim_winnings must fail.
+        let env = create_test_env();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, MarketContract);
+        let client      = MarketContractClient::new(&env, &contract_id);
+        initialize_market(&env, &client);
+
+        let bettor = create_test_address(&env);
+        let bet_id = Bytes::from_array(&env, &[0xddu8; 32]);
+        let oracle = create_test_address(&env);
+
+        env.as_contract(&contract_id, || {
+            let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo).unwrap();
+            market.status = MarketStatus::Locked;
+            market.oracle_address = oracle.clone();
+            env.storage().persistent().set(&DataKey::MarketInfo, &market);
+
+            let bet = Bet {
+                bet_id:    bet_id.clone(),
+                market_id: market.market_id.clone(),
+                bettor:    bettor.clone(),
+                side:      BetSide::FighterA,
+                amount:    100_000,
+                placed_at: 0,
+                claimed:   false,
+            };
+            env.storage().persistent().set(&DataKey::Bet(bet_id.clone()), &bet);
+        });
+
+        client.resolve_market(&oracle, &Outcome::Draw);
+
+        // claim_winnings requires status==Resolved; Draw→Cancelled so this must fail.
+        assert!(client.try_claim_winnings(&bettor, &bet_id).is_err());
+    }
 }
