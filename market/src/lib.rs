@@ -1,13 +1,9 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, Address, Bytes, Env, Vec, Symbol};
-use crate::types::{Bet, BetSide, ClaimReceipt, Fighter, Market, MarketStatus, Outcome, WinningsClaimed, MarketResolved};
-use crate::types::{Bet, BetSide, ClaimReceipt, Fighter, Market, MarketStatus, Outcome};
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String, Vec};
+use crate::types::{Bet, BetSide, ClaimReceipt, Fighter, Market, MarketResolved, MarketStatus, Outcome, ProtocolConfig, WinningsClaimed};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Bytes, Env, String, Symbol, Vec};
 
 const MARKET_INFO_KEY: &str = "market_info";
 const NEXT_BET_ID_KEY: &str = "next_bet_id";
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Bytes, Env, Symbol, Vec};
-use crate::types::{Bet, BetSide, Fighter, Market, MarketStatus, Outcome, ProtocolConfig};
 
 // ─── STORAGE KEYS ─────────────────────────────────────────────────────────────
 // MARKET_INFO           -> Market
@@ -488,8 +484,17 @@ impl MarketContract {
     /// Returns all bets placed by a specific address on this market.
     /// Returns empty Vec if address has no bets.
     pub fn get_bets_by_address(env: Env, bettor: Address) -> Vec<Bet> {
-        let _ = (env, bettor);
-        todo!("implement: read BETS_BY_ADDR_{{bettor}} for bet_ids, map to Bet structs, return vec")
+        let bet_ids: Vec<Bytes> = env.storage().persistent()
+            .get(&DataKey::BetsByAddr(bettor))
+            .unwrap_or(Vec::new(&env));
+        let mut bets: Vec<Bet> = Vec::new(&env);
+        for bet_id in bet_ids.iter() {
+            let bet: Bet = env.storage().persistent()
+                .get(&DataKey::Bet(bet_id))
+                .expect("bet not found for bet_id in index");
+            bets.push_back(bet);
+        }
+        bets
     }
 
     /// Read-only. Calculates the estimated payout for a given bet
@@ -504,8 +509,14 @@ impl MarketContract {
     /// implied_odds = pool_side / total_pool expressed as basis points (0-10000).
     /// Handles zero total_pool edge case (returns 5000/5000 even split).
     pub fn get_pool_odds(env: Env) -> (i128, i128, u32, u32) {
-        let _ = env;
-        todo!("implement: read pools from MARKET_INFO, compute implied odds, return tuple")
+        let market: Market = env.storage().persistent().get(&DataKey::MarketInfo)
+            .expect("market not initialized");
+        if market.total_pool == 0 {
+            return (market.pool_a, market.pool_b, 5000, 5000);
+        }
+        let odds_a_bp = ((market.pool_a as u128 * 10000) / market.total_pool as u128) as u32;
+        let odds_b_bp = 10000 - odds_a_bp;
+        (market.pool_a, market.pool_b, odds_a_bp, odds_b_bp)
     }
 }
 
@@ -544,6 +555,8 @@ mod tests {
             total_pool: 0,
             protocol_fee_bp: 100,
             oracle_address: addr_from_u8(env, 2),
+            outcome: None,
+            fee_collector_address: addr_from_u8(env, 3),
         }
     }
 
@@ -583,6 +596,10 @@ mod tests {
         assert_eq!(data.market_id, market.market_id);
         assert_eq!(data.outcome, outcome);
         assert_eq!(data.resolved_at, env.ledger().timestamp());
+    }
+}
+
+#[cfg(test)]
 mod test {
     use super::*;
     use soroban_sdk::testutils::Address as _;
