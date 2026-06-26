@@ -18,6 +18,7 @@ const PAUSED: &str          = "PAUSED";
 const DEFAULT_CONFIG: &str  = "DEFAULT_CONFIG";
 const MARKET_WASM_HASH: &str = "MARKET_WASM_HASH";
 const OPEN_MARKETS: &str    = "OPEN_MARKETS";
+const ALL_MARKETS: &str     = "ALL_MARKETS";
 
 #[contractclient(name = "MarketClient")]
 pub trait MarketInterface {
@@ -93,6 +94,7 @@ impl MarketFactory {
         let zero_hash: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
         env.storage().persistent().set(&MARKET_WASM_HASH, &zero_hash);
         env.storage().persistent().set(&OPEN_MARKETS, &Vec::<u64>::new(&env));
+        env.storage().persistent().set(&ALL_MARKETS, &Vec::<u64>::new(&env));
         Ok(())
     }
 
@@ -203,6 +205,12 @@ impl MarketFactory {
         open_markets.push_back(market_id);
         env.storage().persistent().set(&OPEN_MARKETS, &open_markets);
 
+        // Track in all markets list
+        let mut all_markets: Vec<u64> =
+            env.storage().persistent().get(&ALL_MARKETS).unwrap_or_else(|| Vec::new(&env));
+        all_markets.push_back(market_id);
+        env.storage().persistent().set(&ALL_MARKETS, &all_markets);
+
         boxmeout_shared::emit_market_created(&env, market_id, market_address, fight.match_id);
         Ok(market_id)
     }
@@ -240,6 +248,27 @@ impl MarketFactory {
                 }
             }
             i += 1;
+        }
+        result
+    }
+
+    /// Returns a paginated list of all market IDs.
+    /// Returns empty Vec when offset >= total (no panic).
+    /// `limit` is capped at 100.
+    pub fn get_markets_paginated(env: Env, offset: u64, limit: u32) -> Vec<u64> {
+        let all_markets: Vec<u64> = env.storage().persistent()
+            .get(&ALL_MARKETS)
+            .unwrap_or_else(|| Vec::new(&env));
+        let total = all_markets.len();
+        if (offset as u32) >= total {
+            return Vec::new(&env);
+        }
+        let cap = if limit > 100 { 100u32 } else { limit };
+        let mut result: Vec<u64> = Vec::new(&env);
+        let start = offset as u32;
+        let end = (start + cap).min(total);
+        for i in start..end {
+            result.push_back(all_markets.get(i).unwrap());
         }
         result
     }
@@ -584,5 +613,27 @@ mod tests {
             result.is_err(),
             "Should fail (no WASM hash) but NOT due to pause guard"
         );
+    }
+
+    #[test]
+    fn test_get_markets_paginated_returns_empty_when_no_markets() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let oracles: Vec<Address> = Vec::new(&env);
+        client.initialize(&admin, &200u32, &oracles);
+
+        let result = client.get_markets_paginated(&0u64, &10u32);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_get_markets_paginated_returns_empty_when_offset_ge_total() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let oracles: Vec<Address> = Vec::new(&env);
+        client.initialize(&admin, &200u32, &oracles);
+
+        let result = client.get_markets_paginated(&100u64, &10u32);
+        assert!(result.is_empty());
     }
 }
