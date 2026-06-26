@@ -42,19 +42,21 @@ pub struct Fighter {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Market {
-    pub market_id:       Bytes,
-    pub fighter_a:       Fighter,
-    pub fighter_b:       Fighter,
-    pub scheduled_at:    u64,
-    pub betting_ends_at: u64,
-    pub created_at:      u64,
-    pub created_by:      Address,
-    pub status:          MarketStatus,
-    pub pool_a:          i128,         // Total XLM staked on Fighter A (stroops)
-    pub pool_b:          i128,         // Total XLM staked on Fighter B (stroops)
-    pub total_pool:      i128,
-    pub protocol_fee_bp: u32,          // Fee in basis points — 200 = 2%
-    pub oracle_address:  Address,
+    pub market_id:           Bytes,
+    pub fighter_a:           Fighter,
+    pub fighter_b:           Fighter,
+    pub scheduled_at:        u64,
+    pub betting_ends_at:     u64,
+    pub created_at:          u64,
+    pub created_by:          Address,
+    pub status:              MarketStatus,
+    pub pool_a:              i128,         // Total XLM staked on Fighter A (stroops)
+    pub pool_b:              i128,         // Total XLM staked on Fighter B (stroops)
+    pub total_pool:          i128,
+    pub protocol_fee_bp:     u32,          // Fee in basis points — 200 = 2%
+    pub oracle_address:      Address,
+    pub outcome:             Option<Outcome>,
+    pub fee_collector_address: Address,
 }
 
 #[contracttype]
@@ -76,6 +78,32 @@ pub struct ClaimReceipt {
     pub bettor:     Address,
     pub payout:     i128,
     pub claimed_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MarketResolved {
+    pub market_id:  Bytes,
+    pub outcome:    Outcome,
+    pub resolved_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct WinningsClaimed {
+    pub bet_id:     Bytes,
+    pub bettor:     Address,
+    pub payout:     i128,
+    pub fee_paid:   i128,
+    pub claimed_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeesDeposited {
+    pub caller:    Address,
+    pub amount:    i128,
+    pub timestamp: u64,
 }
 
 #[contracttype]

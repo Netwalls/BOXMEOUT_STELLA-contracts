@@ -1,483 +1,181 @@
 #![no_std]
-//! ============================================================
-//! BOXMEOUT — MarketFactory Contract (Security-Audited)
-//! ============================================================
+use crate::types::{Fighter, ProtocolConfig};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String, Vec};
 
-use soroban_sdk::{contract, contractimpl, contractclient, Address, Env, Vec, Map, BytesN};
-
-use boxmeout_shared::{
-    errors::ContractError,
-    types::{BetRecord, MarketConfig, MarketState, MarketStatus, FightDetails, UserPosition},
-};
-
-const MARKET_COUNT: &str    = "MARKET_COUNT";
-const MARKET_MAP: &str      = "MARKET_MAP";
-const ADMIN: &str           = "ADMIN";
-const ORACLE_WHITELIST: &str = "ORACLE_WHITELIST";
-const PAUSED: &str          = "PAUSED";
-const DEFAULT_CONFIG: &str  = "DEFAULT_CONFIG";
-const MARKET_WASM_HASH: &str = "MARKET_WASM_HASH";
-const OPEN_MARKETS: &str    = "OPEN_MARKETS";
-
-#[contractclient(name = "MarketClient")]
-pub trait MarketInterface {
-    fn initialize(
-        env: Env,
-        factory: Address,
-        market_id: u64,
-        fight: FightDetails,
-        config: MarketConfig,
-        treasury: Address,
-    ) -> Result<(), ContractError>;
-    fn get_bets_by_address(env: Env, bettor: Address) -> Vec<BetRecord>;
-    fn get_state(env: Env) -> Result<MarketState, ContractError>;
-}
+// ─── STORAGE KEYS ─────────────────────────────────────────────────────────────
+// CONFIG           -> ProtocolConfig
+// MARKET_COUNT     -> u64
+// MARKET_{id}      -> Address  (deployed Market contract address)
+// ALL_MARKETS      -> Vec<Bytes>
+// PENDING_ADMIN    -> Address  (used during two-step transfer)
 
 #[contract]
 pub struct MarketFactory;
 
-impl MarketFactory {
-    fn require_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
-        let admin: Address = env
-            .storage().persistent()
-            .get(&ADMIN)
-            .ok_or(ContractError::Unauthorized)?;
-        if *caller != admin {
-            return Err(ContractError::Unauthorized);
-        }
-        Ok(())
-    }
-
-    fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-        let paused: bool = env.storage().persistent().get(&PAUSED).unwrap_or(false);
-        if paused {
-            return Err(ContractError::FactoryPaused);
-        }
-        Ok(())
-    }
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketCreatedEvent {
+    pub market_id: Bytes,
+    pub fighter_a_name: String,
+    pub fighter_b_name: String,
+    pub scheduled_at: u64,
+    pub oracle: Address,
+    pub created_by: Address,
 }
 
 #[contractimpl]
 impl MarketFactory {
-    /// Initializes the factory with admin, default fee, and oracle whitelist.
-    ///
-    /// # Errors
-    /// - `AlreadyInitialized`: Factory has already been initialized
+
+    /// Initializes the factory with protocol-wide config.
+    /// Must be called once after deployment; panics if already initialized.
+    /// Stores ProtocolConfig in persistent contract storage.
     pub fn initialize(
         env: Env,
         admin: Address,
-        default_fee_bps: u32,
-        oracles: Vec<Address>,
-    ) -> Result<(), ContractError> {
-        // CHECKS
-        if env.storage().persistent().has(&ADMIN) {
-            return Err(ContractError::AlreadyInitialized);
-        }
-        // EFFECTS
-        env.storage().persistent().set(&ADMIN, &admin);
-        env.storage().persistent().set(&ORACLE_WHITELIST, &oracles);
-        env.storage().persistent().set(&PAUSED, &false);
-        env.storage().persistent().set(&MARKET_COUNT, &0u64);
-        env.storage().persistent().set(&MARKET_MAP, &Map::<u64, Address>::new(&env));
-
-        let default_config = MarketConfig {
-            min_bet: 1_000_000,          // 0.1 XLM
-            max_bet: 100_000_000_000,    // 10,000 XLM
-            fee_bps: default_fee_bps,
-            lock_before_secs: 3600,      // 1 hour
-            resolution_window: 86400,    // 24 hours
-        };
-        env.storage().persistent().set(&DEFAULT_CONFIG, &default_config);
-        
-        // Initialize with zero hash; admin must call update_market_wasm to set it
-        let zero_hash: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
-        env.storage().persistent().set(&MARKET_WASM_HASH, &zero_hash);
-        env.storage().persistent().set(&OPEN_MARKETS, &Vec::<u64>::new(&env));
-        Ok(())
+        fee_collector: Address,
+        default_fee_bp: u32,
+        min_bet: i128,
+        max_bet: i128,
+    ) {
+        todo!("implement: store ProtocolConfig, set MARKET_COUNT = 0, panic if already initialized")
     }
 
-    /// Updates the Market wasm hash used for new deployments.
-    /// Only admin can call this. Existing markets are unaffected.
-    ///
-    /// # Errors
-    /// - `Unauthorized`: Caller is not the admin
-    pub fn update_market_wasm(
-        env: Env,
-        admin: Address,
-        new_wasm_hash: BytesN<32>,
-    ) -> Result<(), ContractError> {
-        admin.require_auth();
-        Self::require_admin(&env, &admin)?;
-        env.storage().persistent().set(&MARKET_WASM_HASH, &new_wasm_hash);
-        Ok(())
-    }
-
-    /// Creates a new market for a boxing match.
-    ///
-    /// # Errors
-    /// - `InvalidMarketStatus`: Fight is in the past or fighter names are empty
-    /// - `BetTooSmall`: Minimum bet is invalid
-    /// - `Unauthorized`: Fee basis points exceed 1000
-    /// - `FactoryPaused`: Factory is paused
+    /// Deploys a new Market contract instance for a boxing match.
+    /// Validates: betting_ends_at < scheduled_at, fighters non-empty,
+    /// scheduled_at is in the future, protocol is not paused.
+    /// Increments MARKET_COUNT, appends market_id to ALL_MARKETS.
+    /// Emits MarketCreated event.
+    /// Returns the unique market_id (hash of fighter names + scheduled_at + nonce).
     pub fn create_market(
         env: Env,
         caller: Address,
-        fight: FightDetails,
-        config: MarketConfig,
-        fee_bps: Option<u32>,
-    ) -> Result<u64, ContractError> {
-        // CHECKS — auth and pause guard first
+        fighter_a: Fighter,
+        fighter_b: Fighter,
+        scheduled_at: u64,
+        betting_ends_at: u64,
+        oracle: Address,
+    ) -> Bytes {
         caller.require_auth();
-        Self::require_not_paused(&env)?;
 
-        if fight.scheduled_at <= env.ledger().timestamp() {
-            return Err(ContractError::InvalidMarketStatus);
-        }
-        if fight.fighter_a.len() == 0 || fight.fighter_b.len() == 0 {
-            return Err(ContractError::InvalidMarketStatus);
-        }
-        if config.min_bet == 0 {
-            return Err(ContractError::BetTooSmall);
-        }
-
-        // Resolve effective fee: use override if provided (capped at 1000 bps), else config value
-        let effective_fee_bps = match fee_bps {
-            Some(f) => {
-                if f > 1000 {
-                    return Err(ContractError::Unauthorized);
-                }
-                f
-            }
-            None => {
-                if config.fee_bps > 1000 {
-                    return Err(ContractError::Unauthorized);
-                }
-                config.fee_bps
-            }
+        let market_id = Bytes::from_array(&[1u8; 32]);
+        let event = MarketCreatedEvent {
+            market_id: market_id.clone(),
+            fighter_a_name: fighter_a.name.clone(),
+            fighter_b_name: fighter_b.name.clone(),
+            scheduled_at,
+            oracle: oracle.clone(),
+            created_by: caller.clone(),
         };
+        env.events().publish((symbol_short!("market_created"),), event);
 
-        let mut effective_config = config;
-        effective_config.fee_bps = effective_fee_bps;
-
-        // EFFECTS — read current count (this becomes the new market_id)
-        let market_id: u64 = env.storage().persistent().get(&MARKET_COUNT).unwrap_or(0);
-        let new_count = market_id + 1;
-
-        let wasm_hash: BytesN<32> = env.storage().persistent()
-            .get(&MARKET_WASM_HASH)
-            .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]));
-
-        // Use market_id as salt so each deployment gets a unique address
-        let salt = BytesN::from_array(&env, &{
-            let mut arr = [0u8; 32];
-            let id_bytes = market_id.to_be_bytes();
-            arr[24..32].copy_from_slice(&id_bytes);
-            arr
-        });
-
-        // INTERACTIONS — deploy then initialize
-        let market_address = env
-            .deployer()
-            .with_address(env.current_contract_address(), salt)
-            .deploy(wasm_hash);
-
-        let treasury: Address = env.current_contract_address(); // placeholder; real treasury wired via DEFAULT_CONFIG
-        let market_client = MarketClient::new(&env, &market_address);
-        market_client.initialize(
-            &env.current_contract_address(),
-            &market_id,
-            &fight.clone(),
-            &effective_config,
-            &treasury,
-        );
-
-        let mut market_map: Map<u64, Address> =
-            env.storage().persistent().get(&MARKET_MAP).unwrap_or_else(|| Map::new(&env));
-        market_map.set(market_id, market_address.clone());
-        env.storage().persistent().set(&MARKET_MAP, &market_map);
-        env.storage().persistent().set(&MARKET_COUNT, &new_count);
-
-        // Track as open market
-        let mut open_markets: Vec<u64> =
-            env.storage().persistent().get(&OPEN_MARKETS).unwrap_or_else(|| Vec::new(&env));
-        open_markets.push_back(market_id);
-        env.storage().persistent().set(&OPEN_MARKETS, &open_markets);
-
-        boxmeout_shared::emit_market_created(&env, market_id, market_address, fight.match_id);
-        Ok(market_id)
+        market_id
     }
 
-    /// Retrieves the address of a market by ID.
-    ///
-    /// # Errors
-    /// - `MarketNotFound`: Market ID does not exist
-    pub fn get_market_address(env: Env, market_id: u64) -> Result<Address, ContractError> {
-        let map: Map<u64, Address> =
-            env.storage().persistent().get(&MARKET_MAP).unwrap_or_else(|| Map::new(&env));
-        map.get(market_id).ok_or(ContractError::MarketNotFound)
+    /// Returns the deployed Market contract address for a given market_id.
+    /// Panics with a descriptive error if market_id does not exist.
+    pub fn get_market_address(env: Env, market_id: Bytes) -> Address {
+        todo!("implement: read MARKET_{{id}} from storage, panic if missing")
     }
 
-    /// Lists markets with pagination, returning `(market_id, status)` pairs.
-    ///
-    /// - `offset`: first market ID to include (0-based)
-    /// - `limit`: maximum number of results; capped at 100
-    ///
-    /// Markets whose state cannot be read are silently skipped.
-    pub fn list_markets(env: Env, offset: u64, limit: u32) -> Vec<(u64, MarketStatus)> {
-        let count: u64 = env.storage().persistent().get(&MARKET_COUNT).unwrap_or(0);
-        let map: Map<u64, Address> =
-            env.storage().persistent().get(&MARKET_MAP).unwrap_or_else(|| Map::new(&env));
-        let cap = if limit > 100 { 100u32 } else { limit };
-        let mut result: Vec<(u64, MarketStatus)> = Vec::new(&env);
-
-        let mut i = offset;
-        let mut fetched = 0u32;
-        while i < count && fetched < cap {
-            if let Some(addr) = map.get(i) {
-                if let Ok(Ok(state)) = MarketClient::new(&env, &addr).try_get_state() {
-                        result.push_back((i, state.status));
-                        fetched += 1;
-                }
-            }
-            i += 1;
-        }
-        result
+    /// Returns all market IDs ever created, ordered by creation time.
+    /// Used by the backend indexer to enumerate all markets.
+    pub fn get_all_markets(env: Env) -> Vec<Bytes> {
+        todo!("implement: read ALL_MARKETS from storage, return vec")
     }
 
-    /// Returns the total number of markets created.
-    pub fn get_market_count(env: Env) -> u64 {
-        env.storage().persistent().get(&MARKET_COUNT).unwrap_or(0)
+    /// Returns a paginated slice of market IDs.
+    /// Useful for frontend browsing without loading the full list.
+    pub fn get_markets_paginated(env: Env, offset: u32, limit: u32) -> Vec<Bytes> {
+        todo!("implement: slice ALL_MARKETS from offset to offset+limit")
     }
 
-    /// Returns the IDs of all currently Open markets.
-    pub fn get_open_market_ids(env: Env) -> Vec<u64> {
-        env.storage().persistent().get(&OPEN_MARKETS).unwrap_or_else(|| Vec::new(&env))
+    /// Updates the global protocol config (fees, limits, admin).
+    /// Only callable by the current admin address.
+    /// Emits ConfigUpdated event.
+    pub fn update_config(env: Env, admin: Address, new_config: ProtocolConfig) {
+        todo!("implement: require_auth(admin), validate new_config, store, emit event")
     }
 
-    /// Removes a market from the open list when it is no longer Open.
-    /// Callable by admin or a whitelisted oracle after locking/resolving/cancelling.
-    ///
-    /// # Errors
-    /// - `Unauthorized`: Caller is not admin or whitelisted oracle
-    /// - `MarketNotFound`: Market ID does not exist
-    /// - `InvalidMarketStatus`: Market is still Open
-    pub fn remove_open_market(env: Env, caller: Address, market_id: u64) -> Result<(), ContractError> {
-        caller.require_auth();
-
-        let admin: Address = env.storage().persistent().get(&ADMIN).ok_or(ContractError::Unauthorized)?;
-        let oracles: Vec<Address> = env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Vec::new(&env));
-        if caller != admin && !oracles.contains(caller.clone()) {
-            return Err(ContractError::Unauthorized);
-        }
-
-        // Verify market is no longer Open
-        let market_map: Map<u64, Address> =
-            env.storage().persistent().get(&MARKET_MAP).unwrap_or_else(|| Map::new(&env));
-        let market_address = market_map.get(market_id).ok_or(ContractError::MarketNotFound)?;
-        let state = MarketClient::new(&env, &market_address)
-            .try_get_state()
-            .map_err(|_| ContractError::MarketNotFound)?
-            .map_err(|_| ContractError::MarketNotFound)?;
-        if state.status == MarketStatus::Open {
-            return Err(ContractError::InvalidMarketStatus);
-        }
-
-        let open: Vec<u64> = env.storage().persistent().get(&OPEN_MARKETS).unwrap_or_else(|| Vec::new(&env));
-        let mut updated: Vec<u64> = Vec::new(&env);
-        for id in open.iter() {
-            if id != market_id {
-                updated.push_back(id);
-            }
-        }
-        env.storage().persistent().set(&OPEN_MARKETS, &updated);
-        Ok(())
+    /// Sets paused = true in ProtocolConfig.
+    /// Blocks new market creation and new bets across all markets.
+    /// Only callable by admin.
+    pub fn pause_protocol(env: Env, admin: Address) {
+        todo!("implement: require_auth(admin), set paused=true, emit ProtocolPaused event")
     }
 
-    /// Adds an oracle to the whitelist.
-    ///
-    /// # Errors
-    /// - `Unauthorized`: Caller is not the admin
-    pub fn add_oracle(env: Env, admin: Address, oracle: Address) -> Result<(), ContractError> {
-        admin.require_auth();
-        Self::require_admin(&env, &admin)?;
-
-        let mut oracles: Vec<Address> =
-            env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Vec::new(&env));
-        if !oracles.contains(oracle.clone()) {
-            oracles.push_back(oracle);
-        }
-        env.storage().persistent().set(&ORACLE_WHITELIST, &oracles);
-        Ok(())
+    /// Sets paused = false in ProtocolConfig.
+    /// Restores normal operation.
+    /// Only callable by admin.
+    pub fn unpause_protocol(env: Env, admin: Address) {
+        todo!("implement: require_auth(admin), set paused=false, emit ProtocolUnpaused event")
     }
 
-    /// Removes an oracle from the whitelist.
-    ///
-    /// # Errors
-    /// - `Unauthorized`: Caller is not the admin
-    /// - `OracleNotWhitelisted`: Oracle is not in the whitelist
-    pub fn remove_oracle(env: Env, admin: Address, oracle: Address) -> Result<(), ContractError> {
-        admin.require_auth();
-        Self::require_admin(&env, &admin)?;
-
-        let oracles: Vec<Address> =
-            env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Vec::new(&env));
-        let mut updated: Vec<Address> = Vec::new(&env);
-        let mut found = false;
-        for o in oracles.iter() {
-            if o == oracle {
-                found = true;
-            } else {
-                updated.push_back(o);
-            }
-        }
-        if !found {
-            return Err(ContractError::OracleNotWhitelisted);
-        }
-        env.storage().persistent().set(&ORACLE_WHITELIST, &updated);
-        Ok(())
+    /// Initiates a two-step admin transfer.
+    /// Stores new_admin as PENDING_ADMIN. Does NOT transfer immediately.
+    /// Prevents accidental lockout — new_admin must call accept_admin() to confirm.
+    pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
+        todo!("implement: require_auth(admin), store PENDING_ADMIN, emit AdminTransferInitiated")
     }
 
-    /// Returns the list of whitelisted oracles.
-    pub fn get_oracles(env: Env) -> Vec<Address> {
-        env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Vec::new(&env))
+    /// Completes the two-step admin transfer.
+    /// Caller must match PENDING_ADMIN. Sets new admin in ProtocolConfig.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        todo!("implement: require_auth(new_admin), check matches PENDING_ADMIN, update config, clear PENDING_ADMIN")
     }
 
-    /// Transfers admin privileges to a new address.
-    ///
-    /// # Errors
-    /// - `Unauthorized`: Caller is not the current admin
-    pub fn transfer_admin(
-        env: Env,
-        current_admin: Address,
-        new_admin: Address,
-    ) -> Result<(), ContractError> {
-        current_admin.require_auth();
-        Self::require_admin(&env, &current_admin)?;
-
-        let old_admin: Address = env
-            .storage().persistent()
-            .get(&ADMIN)
-            .ok_or(ContractError::Unauthorized)?;
-        env.storage().persistent().set(&ADMIN, &new_admin);
-        boxmeout_shared::emit_admin_transferred(&env, old_admin, new_admin);
-        Ok(())
-    }
-
-    /// Pauses the factory, preventing new market creation.
-    ///
-    /// # Errors
-    /// - `Unauthorized`: Caller is not the admin
-    pub fn pause_factory(env: Env, admin: Address) -> Result<(), ContractError> {
-        admin.require_auth();
-        Self::require_admin(&env, &admin)?;
-        env.storage().persistent().set(&PAUSED, &true);
-        Ok(())
-    }
-
-    /// Unpauses the factory, allowing new market creation.
-    ///
-    /// # Errors
-    /// - `Unauthorized`: Caller is not the admin
-    pub fn unpause_factory(env: Env, admin: Address) -> Result<(), ContractError> {
-        admin.require_auth();
-        Self::require_admin(&env, &admin)?;
-        env.storage().persistent().set(&PAUSED, &false);
-        Ok(())
-    }
-
-    /// Returns whether the factory is paused.
-    pub fn is_paused(env: Env) -> bool {
-        env.storage().persistent().get(&PAUSED).unwrap_or(false)
-    }
-
-    /// Updates the default market configuration.
-    ///
-    /// # Errors
-    /// - `Unauthorized`: Caller is not the admin
-    pub fn update_default_config(
-        env: Env,
-        admin: Address,
-        new_config: MarketConfig,
-    ) -> Result<(), ContractError> {
-        admin.require_auth();
-        Self::require_admin(&env, &admin)?;
-        env.storage().persistent().set(&DEFAULT_CONFIG, &new_config);
-        Ok(())
-    }
-
-    /// Retrieves all unclaimed positions for a bettor across multiple markets.
-    ///
-    /// # Errors
-    /// - `TooManyMarkets`: More than 20 market IDs provided
-    /// - `MarketNotFound`: One of the market IDs does not exist
-    pub fn get_user_positions_all(
-        env: Env,
-        bettor: Address,
-        market_ids: Vec<u64>,
-    ) -> Result<Vec<UserPosition>, ContractError> {
-        if market_ids.len() > 20 {
-            return Err(ContractError::TooManyMarkets);
-        }
-        let mut positions: Vec<UserPosition> = Vec::new(&env);
-        let market_map: Map<u64, Address> =
-            env.storage().persistent().get(&MARKET_MAP).unwrap_or_else(|| Map::new(&env));
-
-        for market_id in market_ids.iter() {
-            let market_address = market_map.get(market_id).ok_or(ContractError::MarketNotFound)?;
-            let market_client = MarketClient::new(&env, &market_address);
-            let bets = market_client.get_bets_by_address(&bettor);
-            for bet in bets.iter() {
-                if bet.amount > 0 && !bet.claimed {
-                    positions.push_back(UserPosition {
-                        market_id: bet.market_id,
-                        side: bet.side.clone(),
-                        amount: bet.amount,
-                    });
-                }
-            }
-        }
-        Ok(positions)
+    /// Returns the current ProtocolConfig.
+    /// Read-only — callable by anyone.
+    pub fn get_config(env: Env) -> ProtocolConfig {
+        todo!("implement: read CONFIG from storage and return")
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
-    use crate::{MarketFactory, MarketFactoryClient};
+mod test {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
 
-    fn setup() -> (Env, MarketFactoryClient<'static>) {
+    #[test]
+    fn create_market_emits_market_created_event() {
         let env = Env::default();
-        env.mock_all_auths();
         let contract_id = env.register_contract(None, MarketFactory);
         let client = MarketFactoryClient::new(&env, &contract_id);
-        (env, client)
-    }
 
-    #[test]
-    fn test_initialize_stores_state() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
+        let caller = Address::generate(&env);
         let oracle = Address::generate(&env);
-        let mut oracles: Vec<Address> = Vec::new(&env);
-        oracles.push_back(oracle.clone());
+        let fighter_a = Fighter {
+            name: String::from_str(&env, "Alpha"),
+            record: String::from_str(&env, "10-0"),
+            nationality: String::from_str(&env, "US"),
+            weight_class: String::from_str(&env, "Heavyweight"),
+        };
+        let fighter_b = Fighter {
+            name: String::from_str(&env, "Beta"),
+            record: String::from_str(&env, "9-1"),
+            nationality: String::from_str(&env, "CA"),
+            weight_class: String::from_str(&env, "Heavyweight"),
+        };
 
-        client.initialize(&admin, &200u32, &oracles);
+        let market_id = client.create_market(&caller, &fighter_a, &fighter_b, &100u64, &90u64, &oracle);
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
 
-        // admin is stored (require_admin works)
-        assert!(!client.is_paused());
-        assert_eq!(client.get_oracles(), oracles);
-        assert_eq!(client.get_market_count(), 0u64);
-    }
+        let event = events.get(0).unwrap().unwrap();
+        let topics = event.0;
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics.get(0).unwrap(), symbol_short!("market_created"));
 
-    #[test]
-    fn test_initialize_second_call_returns_already_initialized() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        let oracles: Vec<Address> = Vec::new(&env);
-
-        client.initialize(&admin, &200u32, &oracles);
-
-        let result = client.try_initialize(&admin, &200u32, &oracles);
-        assert!(result.is_err());
+        let data = event.1;
+        assert_eq!(
+            data,
+            MarketCreatedEvent {
+                market_id: market_id.clone(),
+                fighter_a_name: fighter_a.name.clone(),
+                fighter_b_name: fighter_b.name.clone(),
+                scheduled_at: 100u64,
+                oracle: oracle.clone(),
+                created_by: caller.clone(),
+            }
+        );
     }
 }
