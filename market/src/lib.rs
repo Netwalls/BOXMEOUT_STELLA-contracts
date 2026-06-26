@@ -61,9 +61,27 @@ impl MarketContract {
         env.storage().persistent().set(&NEXT_BET_ID_KEY, &id);
     }
 
-    /// Called by MarketFactory immediately after contract deployment.
-    /// Stores all market metadata and initializes pool values to 0.
-    /// Sets status to Open. Must only be callable by the factory address.
+    /// Initializes a new boxing prediction market.
+    ///
+    /// Called by `MarketFactory` immediately after contract deployment.
+    /// Stores all market metadata and initializes pool values to 0, with status set to `Open`.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `market_id` - Unique identifier for this market (32-byte hash).
+    /// * `fighter_a` - Metadata for the first fighter.
+    /// * `fighter_b` - Metadata for the second fighter.
+    /// * `scheduled_at` - Unix timestamp (seconds) of the scheduled fight time.
+    /// * `betting_ends_at` - Unix timestamp after which no new bets are accepted.
+    /// * `oracle` - Address authorized to lock and resolve this market.
+    /// * `factory` - Address of the deploying `MarketFactory` contract.
+    /// * `protocol_fee_bp` - Protocol fee in basis points (e.g. `200` = 2%).
+    /// * `fee_collector` - Address that receives the protocol fee on payouts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the market has already been initialized.
     pub fn initialize(
         env: Env,
         market_id: Bytes,
@@ -102,12 +120,30 @@ impl MarketContract {
         env.storage().persistent().set(&DataKey::Factory, &factory);
     }
 
-    /// Accepts XLM from bettor and records their bet in contract storage.
-    /// Validates: market is Open, current time < betting_ends_at,
-    /// amount within min/max bounds, bettor has authorized the call.
-    /// Transfers XLM from bettor to this contract (escrow).
-    /// Updates pool_a or pool_b. Generates unique bet_id.
-    /// Emits BetPlaced event. Returns bet_id.
+    /// Places a bet on a fighter in this market.
+    ///
+    /// Transfers XLM from `bettor` to this contract (escrow), records the bet,
+    /// updates the relevant pool, and emits a `BetPlaced` event.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `bettor` - Address of the user placing the bet. Must authorize this call.
+    /// * `side` - Which fighter to bet on (`BetSide::FighterA` or `BetSide::FighterB`).
+    /// * `amount` - Bet amount in stroops. Must satisfy `min_bet_amount ≤ amount ≤ max_bet_amount`.
+    ///
+    /// # Returns
+    ///
+    /// Returns the unique `bet_id` (`Bytes`) assigned to this bet.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - The market status is not `Open`.
+    /// - The current ledger time is at or after `betting_ends_at`.
+    /// - `amount` is below the configured `min_bet_amount`.
+    /// - `amount` is above the configured `max_bet_amount`.
+    /// - `bettor` has not authorized the call.
     pub fn place_bet(
         env: Env,
         bettor: Address,
@@ -229,20 +265,43 @@ impl MarketContract {
         bet_id
     }
 
-    /// Transitions market status from Open to Locked.
-    /// Callable by the oracle OR auto-triggered when betting_ends_at has passed.
-    /// After locking, no new bets are accepted.
-    /// Emits MarketLocked event.
+    /// Transitions the market status from `Open` to `Locked`.
+    ///
+    /// After locking, no new bets are accepted. Can be called by the oracle address
+    /// at any time, or by anyone once `betting_ends_at` has passed.
+    /// Emits a `MarketLocked` event.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `oracle` - Address of the oracle or any caller after the betting period ends.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the market status is not `Open`, or if `oracle` is not the
+    /// authorized oracle address and the betting period has not yet ended.
     pub fn lock_market(env: Env, oracle: Address) {
         let _ = (env, oracle);
         todo!("implement: verify caller==oracle OR ledger time > betting_ends_at, set status=Locked, emit event")
     }
 
-    /// Called by oracle after fight concludes.
-    /// Validates: caller == oracle, market status == Locked.
-    /// Sets outcome and transitions status to Resolved.
-    /// If outcome is NoContest, sets status to Cancelled for full refunds.
-    /// Emits MarketResolved event.
+    /// Records the fight outcome and resolves the market.
+    ///
+    /// Called by the oracle after the fight concludes. Sets the outcome and
+    /// transitions status to `Resolved`. If `outcome` is `NoContest`, status is
+    /// set to `Cancelled` instead, enabling full refunds. Emits a `MarketResolved` event.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `oracle` - Address of the authorized oracle. Must authorize this call.
+    /// * `outcome` - The fight result (`FighterA`, `FighterB`, `Draw`, or `NoContest`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - The caller is not the authorized oracle address.
+    /// - The market status is not `Locked`.
     pub fn resolve_market(env: Env, oracle: Address, outcome: Outcome) {
         // Emit resolution event before any status transition or early return.
         let market: Market = env
@@ -268,12 +327,32 @@ impl MarketContract {
         todo!("implement: require_auth(oracle), validate status==Locked, store outcome, set status=Resolved or Cancelled, emit event")
     }
 
-    /// Allows a winning bettor to claim proportional share of the pool.
-    /// Validates: status==Resolved, bettor owns bet, side matches outcome, not already claimed.
-    /// Payout = (bettor_stake / winning_pool) * total_pool * (1 - fee_bp/10000)
-    /// Sends protocol fee to fee_collector.
-    /// Marks bet as claimed. Emits WinningsClaimed event.
-    /// Returns payout amount in stroops.
+    /// Pays out winnings to a bettor whose bet matched the fight outcome.
+    ///
+    /// Payout formula: `(bettor_stake / winning_pool) * total_pool * (1 - fee_bp / 10_000)`.
+    /// The protocol fee portion is transferred to `fee_collector`.
+    /// The `CLAIMED` flag is set before any transfer to guard against re-entrancy.
+    /// Emits a `WinningsClaimed` event.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `bettor` - Address of the bettor claiming winnings. Must authorize this call.
+    /// * `bet_id` - Unique identifier of the bet to claim.
+    ///
+    /// # Returns
+    ///
+    /// Returns the payout amount transferred to `bettor`, in stroops.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `bettor` has not authorized the call.
+    /// - `bet_id` does not exist.
+    /// - `bettor` is not the owner of the bet.
+    /// - The market status is not `Resolved`.
+    /// - The bet's side does not match the winning outcome.
+    /// - The bet has already been claimed.
     pub fn claim_winnings(env: Env, bettor: Address, bet_id: Bytes) -> i128 {
         // Minimal implementation: emit WinningsClaimed event after a successful claim.
         // Full payout, fee calculations and transfers are expected in the complete implementation.
@@ -380,10 +459,30 @@ impl MarketContract {
         payout
     }
 
-    /// Issues a full refund for a bet when market is Cancelled or outcome is NoContest.
-    /// No protocol fee deducted on refunds.
-    /// Validates: status==Cancelled or outcome==NoContest, bettor owns bet, not claimed.
-    /// Emits RefundClaimed event. Returns refund amount.
+    /// Issues a full refund of a bettor's stake when the market is cancelled.
+    ///
+    /// Applicable when market status is `Cancelled` or outcome is `NoContest`.
+    /// No protocol fee is deducted on refunds. The `CLAIMED` flag is set before
+    /// any transfer to guard against re-entrancy. Emits a `RefundClaimed` event.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `bettor` - Address of the bettor claiming the refund. Must authorize this call.
+    /// * `bet_id` - Unique identifier of the bet to refund.
+    ///
+    /// # Returns
+    ///
+    /// Returns the refund amount (equal to the original `bet.amount`), in stroops.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `bettor` has not authorized the call.
+    /// - `bet_id` does not exist.
+    /// - `bettor` is not the owner of the bet.
+    /// - The market status is not `Cancelled` and outcome is not `NoContest`.
+    /// - The bet has already been claimed.
     pub fn claim_refund(env: Env, bettor: Address, bet_id: Bytes) -> i128 {
         let _ = (env, bettor, bet_id);
         todo!("implement: require_auth(bettor), validate market state, mark claimed BEFORE transfer, return full bet.amount, emit event")
@@ -449,26 +548,69 @@ impl MarketContract {
         refund_amount
     }
 
-    /// Allows any bettor in this market to raise a dispute after resolution.
-    /// Must be called within dispute_window_sec of resolved_at.
-    /// Transitions status to Disputed — freezes all claim processing.
-    /// Only one active dispute allowed per market.
-    /// Emits DisputeRaised event.
+    /// Raises a dispute against the market resolution.
+    ///
+    /// Transitions status to `Disputed`, freezing all claim processing until an admin
+    /// settles the dispute. Must be called within `dispute_window_sec` of `resolved_at`.
+    /// Only one active dispute is allowed per market. Emits a `DisputeRaised` event.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `bettor` - Address of the bettor raising the dispute. Must authorize this call
+    ///   and must have an existing bet in this market.
+    /// * `reason` - Free-form bytes describing the reason for the dispute.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `bettor` has not authorized the call.
+    /// - `bettor` has no bet in this market.
+    /// - The dispute window has elapsed since resolution.
+    /// - A dispute is already active on this market.
+    /// - The market status is not `Resolved`.
     pub fn raise_dispute(env: Env, bettor: Address, reason: Bytes) {
         let _ = (env, bettor, reason);
         todo!("implement: require_auth(bettor), verify bettor has a bet on this market, check within window, check no existing dispute, set status=Disputed, store reason")
     }
 
-    /// Admin-only. Settles a disputed market with a final override outcome.
-    /// May differ from the oracle's original outcome.
-    /// Transitions status back to Resolved. Claims re-open with new outcome.
-    /// Emits DisputeResolved event.
+    /// Settles a disputed market with a final admin-override outcome.
+    ///
+    /// The override outcome may differ from the oracle's original outcome.
+    /// Transitions status back to `Resolved`, re-opening claims with the new outcome.
+    /// Emits a `DisputeResolved` event.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `admin` - Address of the protocol admin. Must authorize this call.
+    /// * `override_outcome` - The admin-determined final outcome for the market.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `admin` has not authorized the call or is not the configured admin.
+    /// - The market status is not `Disputed`.
     pub fn resolve_dispute(env: Env, admin: Address, override_outcome: Outcome) {
         let _ = (env, admin, override_outcome);
         todo!("implement: require_auth(admin), validate status==Disputed, update outcome, set status=Resolved, emit event")
     }
 
-    /// Read-only. Returns the full Market struct.
+    /// Returns the full [`Market`] struct for this contract.
+    ///
+    /// Read-only — does not modify state.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    ///
+    /// # Returns
+    ///
+    /// Returns the [`Market`] stored in this contract.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the market has not been initialized.
     pub fn get_market_info(env: Env) -> Market {
         let _ = env;
         todo!("implement: read MARKET_INFO from storage and return")
@@ -476,8 +618,22 @@ impl MarketContract {
             .expect("market not initialized")
     }
 
-    /// Returns a specific Bet struct by its ID.
-    /// Panics if bet_id is not found.
+    /// Returns the [`Bet`] identified by `bet_id`.
+    ///
+    /// Read-only — does not modify state.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `bet_id` - Unique identifier of the bet to retrieve.
+    ///
+    /// # Returns
+    ///
+    /// Returns the [`Bet`] struct associated with `bet_id`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bet_id` does not correspond to any recorded bet.
     pub fn get_bet(env: Env, bet_id: Bytes) -> Bet {
         let _ = (env, bet_id);
         todo!("implement: read BET_{{bet_id}} from storage, panic if missing")
@@ -485,24 +641,61 @@ impl MarketContract {
             .expect("bet not found")
     }
 
-    /// Returns all bets placed by a specific address on this market.
-    /// Returns empty Vec if address has no bets.
+    /// Returns all bets placed by `bettor` in this market.
+    ///
+    /// Read-only — does not modify state.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `bettor` - Address whose bets should be retrieved.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`Vec<Bet>`] containing all bets placed by `bettor`.
+    /// Returns an empty `Vec` if `bettor` has no bets in this market.
     pub fn get_bets_by_address(env: Env, bettor: Address) -> Vec<Bet> {
         let _ = (env, bettor);
         todo!("implement: read BETS_BY_ADDR_{{bettor}} for bet_ids, map to Bet structs, return vec")
     }
 
-    /// Read-only. Calculates the estimated payout for a given bet
-    /// using current pool sizes. Does NOT modify state.
-    /// Used by frontend to show live payout estimates before resolution.
+    /// Estimates the payout for a bet based on current pool sizes.
+    ///
+    /// Uses the same formula as [`claim_winnings`] but does not modify state.
+    /// Intended for frontend display of live payout estimates before market resolution.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `bet_id` - Unique identifier of the bet to estimate.
+    ///
+    /// # Returns
+    ///
+    /// Returns the estimated payout in stroops, given current pool totals.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bet_id` does not correspond to any recorded bet.
     pub fn calculate_payout(env: Env, bet_id: Bytes) -> i128 {
         let _ = (env, bet_id);
         todo!("implement: read bet + market pools, apply payout formula, return estimated payout")
     }
 
-    /// Read-only. Returns (pool_a, pool_b, implied_odds_a, implied_odds_b).
-    /// implied_odds = pool_side / total_pool expressed as basis points (0-10000).
-    /// Handles zero total_pool edge case (returns 5000/5000 even split).
+    /// Returns current pool sizes and implied odds for both fighters.
+    ///
+    /// Implied odds are expressed in basis points (0–10000), where
+    /// `implied_odds_a = pool_a / total_pool * 10000`. When `total_pool` is zero,
+    /// returns a 50/50 split (5000, 5000). Read-only — does not modify state.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    ///
+    /// # Returns
+    ///
+    /// Returns a tuple `(pool_a, pool_b, implied_odds_a, implied_odds_b)` where:
+    /// - `pool_a` / `pool_b` are total XLM staked per side, in stroops.
+    /// - `implied_odds_a` / `implied_odds_b` are basis-point probabilities summing to 10000.
     pub fn get_pool_odds(env: Env) -> (i128, i128, u32, u32) {
         let _ = env;
         todo!("implement: read pools from MARKET_INFO, compute implied odds, return tuple")
