@@ -13,6 +13,7 @@ use boxmeout_shared::{
 const MARKET_COUNT: &str    = "MARKET_COUNT";
 const MARKET_MAP: &str      = "MARKET_MAP";
 const ADMIN: &str           = "ADMIN";
+const PENDING_ADMIN: &str   = "PENDING_ADMIN";
 const ORACLE_WHITELIST: &str = "ORACLE_WHITELIST";
 const PAUSED: &str          = "PAUSED";
 const DEFAULT_CONFIG: &str  = "DEFAULT_CONFIG";
@@ -371,7 +372,8 @@ impl MarketFactory {
         env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Vec::new(&env))
     }
 
-    /// Transfers admin privileges to a new address.
+    /// Initiates a two-step admin transfer by storing the new admin as pending.
+    /// The new admin must call `accept_admin` to complete the transfer.
     ///
     /// # Errors
     /// - `Unauthorized`: Caller is not the current admin
@@ -383,12 +385,35 @@ impl MarketFactory {
         current_admin.require_auth();
         Self::require_admin(&env, &current_admin)?;
 
+        env.storage().persistent().set(&PENDING_ADMIN, &new_admin);
+        Ok(())
+    }
+
+    /// Completes the two-step admin transfer.
+    /// Caller must match the address stored as PENDING_ADMIN.
+    ///
+    /// # Errors
+    /// - `Unauthorized`: Caller does not match PENDING_ADMIN or no transfer pending
+    /// - `Unauthorized`: Wrong address (panics if caller != PENDING_ADMIN)
+    pub fn accept_admin(
+        env: Env,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let pending: Address = env
+            .storage().persistent()
+            .get(&PENDING_ADMIN)
+            .ok_or(ContractError::Unauthorized)?;
+        if caller != pending {
+            return Err(ContractError::Unauthorized);
+        }
         let old_admin: Address = env
             .storage().persistent()
             .get(&ADMIN)
             .ok_or(ContractError::Unauthorized)?;
-        env.storage().persistent().set(&ADMIN, &new_admin);
-        boxmeout_shared::emit_admin_transferred(&env, old_admin, new_admin);
+        env.storage().persistent().set(&ADMIN, &caller);
+        env.storage().persistent().remove(&PENDING_ADMIN);
+        boxmeout_shared::emit_admin_transferred(&env, old_admin, caller);
         Ok(())
     }
 
@@ -639,4 +664,49 @@ mod tests {
         assert!(result.is_empty());
     }
 
+    #[test]
+    fn test_transfer_admin_and_accept_admin_two_step() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let oracles: Vec<Address> = Vec::new(&env);
+        client.initialize(&admin, &200u32, &oracles);
+
+        // Step 1: transfer_admin stores pending
+        client.transfer_admin(&admin, &new_admin);
+
+        // Old admin is still admin before accept
+        // Step 2: accept_admin completes the transfer
+        client.accept_admin(&new_admin);
+
+        // Verify new_admin is now admin by performing admin-only operation
+        client.pause_protocol(&new_admin);
+        assert!(client.is_paused());
+    }
+
+    #[test]
+    fn test_accept_admin_wrong_address_panics() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+        let oracles: Vec<Address> = Vec::new(&env);
+        client.initialize(&admin, &200u32, &oracles);
+
+        client.transfer_admin(&admin, &new_admin);
+
+        let result = client.try_accept_admin(&impostor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_accept_admin_without_transfer_panics() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let oracles: Vec<Address> = Vec::new(&env);
+        client.initialize(&admin, &200u32, &oracles);
+
+        let result = client.try_accept_admin(&admin);
+        assert!(result.is_err());
+    }
 }
