@@ -3,6 +3,11 @@ use shared::types::{Bet, BetSide, Fighter, Market, MarketStatus, Outcome, Protoc
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String, Symbol, Vec,
 };
+use crate::types::{Bet, BetSide, ClaimReceipt, Fighter, Market, MarketResolved, MarketStatus, Outcome, ProtocolConfig, WinningsClaimed};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Bytes, Env, String, Symbol, Vec};
+
+const MARKET_INFO_KEY: &str = "market_info";
+const NEXT_BET_ID_KEY: &str = "next_bet_id";
 
 // ─── STORAGE KEYS ─────────────────────────────────────────────────────────────
 // MarketInfo           -> Market
@@ -447,6 +452,7 @@ impl MarketContract {
     pub fn get_market_info(env: Env) -> Market {
         env.storage().persistent()
             .get(&DataKey::MarketInfo)
+        env.storage().persistent().get(&DataKey::MarketInfo)
             .expect("market not initialized")
     }
 
@@ -488,6 +494,7 @@ impl MarketContract {
         env.storage()
             .persistent()
             .get(&DataKey::Bet(bet_id))
+        env.storage().persistent().get(&DataKey::Bet(bet_id))
             .expect("bet not found")
     }
 
@@ -504,6 +511,14 @@ impl MarketContract {
         bets
         let _ = (env, bettor);
         todo!("implement: read BetsByAddr for bet_ids, map to Bet structs, return vec")
+        let mut bets: Vec<Bet> = Vec::new(&env);
+        for bet_id in bet_ids.iter() {
+            let bet: Bet = env.storage().persistent()
+                .get(&DataKey::Bet(bet_id))
+                .expect("bet not found for bet_id in index");
+            bets.push_back(bet);
+        }
+        bets
     }
 
     pub fn calculate_payout(env: Env, bet_id: Bytes) -> i128 {
@@ -525,6 +540,14 @@ impl MarketContract {
         (market.pool_a, market.pool_b, odds_a, odds_b)
         let _ = env;
         todo!("implement: read pools from MarketInfo, compute implied odds, return tuple")
+        let market: Market = env.storage().persistent().get(&DataKey::MarketInfo)
+            .expect("market not initialized");
+        if market.total_pool == 0 {
+            return (market.pool_a, market.pool_b, 5000, 5000);
+        }
+        let odds_a_bp = ((market.pool_a as u128 * 10000) / market.total_pool as u128) as u32;
+        let odds_b_bp = 10000 - odds_a_bp;
+        (market.pool_a, market.pool_b, odds_a_bp, odds_b_bp)
     }
 }
 
@@ -550,6 +573,106 @@ mod tests {
         let oracle      = create_test_address(env);
         let factory     = create_test_address(env);
         let fee_col     = create_test_address(env);
+    fn addr_from_u8(env: &Env, v: u8) -> Address {
+        let b = BytesN::from_array(env, &[v; 32]);
+        Address::from_account_id(env, &b)
+    }
+
+    fn default_market(env: &Env, status: MarketStatus) -> Market {
+        Market {
+            market_id: Bytes::from_array(env, &[0u8; 32]),
+            fighter_a: Fighter {
+                name: "A".into_val(env),
+                record: "0-0-0".into_val(env),
+                nationality: "USA".into_val(env),
+                weight_class: "Heavy".into_val(env),
+            },
+            fighter_b: Fighter {
+                name: "B".into_val(env),
+                record: "0-0-0".into_val(env),
+                nationality: "BRA".into_val(env),
+                weight_class: "Heavy".into_val(env),
+            },
+            scheduled_at: 1,
+            betting_ends_at: 1,
+            created_at: 1,
+            created_by: addr_from_u8(env, 1),
+            status,
+            pool_a: 0,
+            pool_b: 0,
+            total_pool: 0,
+            protocol_fee_bp: 100,
+            oracle_address: addr_from_u8(env, 2),
+            outcome: None,
+            fee_collector_address: addr_from_u8(env, 3),
+        }
+    }
+
+    #[test]
+    fn test_resolve_market_emits_event() {
+        let env = Env::default();
+        let market = default_market(&env, MarketStatus::Locked);
+        env.storage().set(&Symbol::short("MARKET_INFO"), &market);
+
+        let outcome = Outcome::FighterA;
+        MarketContract::resolve_market(env.clone(), market.oracle_address.clone(), outcome.clone());
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (topic, data_raw) = events[0].clone();
+        let data: MarketResolved = data_raw.try_into().unwrap();
+        assert_eq!(topic, Symbol::short("MarketResolved"));
+        assert_eq!(data.market_id, market.market_id);
+        assert_eq!(data.outcome, outcome);
+        assert_eq!(data.resolved_at, env.ledger().timestamp());
+    }
+
+    #[test]
+    fn test_resolve_market_emits_event_for_nocontest() {
+        let env = Env::default();
+        let market = default_market(&env, MarketStatus::Locked);
+        env.storage().set(&Symbol::short("MARKET_INFO"), &market);
+
+        let outcome = Outcome::NoContest;
+        MarketContract::resolve_market(env.clone(), market.oracle_address.clone(), outcome.clone());
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (topic, data_raw) = events[0].clone();
+        let data: MarketResolved = data_raw.try_into().unwrap();
+        assert_eq!(topic, Symbol::short("MarketResolved"));
+        assert_eq!(data.market_id, market.market_id);
+        assert_eq!(data.outcome, outcome);
+        assert_eq!(data.resolved_at, env.ledger().timestamp());
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    #[test]
+    fn place_bet_emits_bet_placed_event() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, MarketContract);
+        let client = MarketContractClient::new(&env, &contract_id);
+
+        let bettor = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let fighter_a = Fighter {
+            name: String::from_str(&env, "A"),
+            record: String::from_str(&env, "10-0"),
+            nationality: String::from_str(&env, "US"),
+            weight_class: String::from_str(&env, "Heavyweight"),
+        };
+        let fighter_b = Fighter {
+            name: String::from_str(&env, "B"),
+            record: String::from_str(&env, "9-1"),
+            nationality: String::from_str(&env, "MX"),
+            weight_class: String::from_str(&env, "Heavyweight"),
+        };
+        let market_id = Bytes::from_array(&[1u8; 32]);
         client.initialize(
             &Bytes::from_array(env, &[1u8; 32]),
             &make_fighter(env, "Alpha"),
@@ -1001,5 +1124,286 @@ mod tests {
         // Attacker never received authorization — require_auth() panics.
         let attacker = Address::generate(&env);
         client.resolve_dispute(&attacker, &Outcome::FighterA);
+    }
+
+    // ── get_pool_odds ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_pool_odds_zero_pool_returns_even_split() {
+        let (env, _, _) = setup_test_env();
+        let (pool_a, pool_b, odds_a, odds_b) = MarketContract::get_pool_odds(env.clone());
+        assert_eq!(pool_a, 0);
+        assert_eq!(pool_b, 0);
+        assert_eq!(odds_a, 5000);
+        assert_eq!(odds_b, 5000);
+    }
+
+    #[test]
+    fn test_get_pool_odds_with_uneven_pools() {
+        let (env, bettor, _) = setup_test_env();
+
+        // Place bets: 300 on A, 700 on B
+        MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, 300);
+        MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterB, 700);
+
+        let (pool_a, pool_b, odds_a, odds_b) = MarketContract::get_pool_odds(env.clone());
+        assert_eq!(pool_a, 300);
+        assert_eq!(pool_b, 700);
+        // odds_a = (300 * 10000) / 1000 = 3000
+        assert_eq!(odds_a, 3000);
+        assert_eq!(odds_b, 7000);
+    }
+
+    #[test]
+    fn test_get_pool_odds_equal_pools() {
+        let (env, bettor, _) = setup_test_env();
+
+        MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, 500);
+        MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterB, 500);
+
+        let (_, _, odds_a, odds_b) = MarketContract::get_pool_odds(env.clone());
+        assert_eq!(odds_a, 5000);
+        assert_eq!(odds_b, 5000);
+    }
+
+    #[test]
+    fn test_get_pool_odds_one_side_only() {
+        let (env, bettor, _) = setup_test_env();
+
+        MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, 1000);
+
+        let (_, _, odds_a, odds_b) = MarketContract::get_pool_odds(env.clone());
+        assert_eq!(odds_a, 10000);
+        assert_eq!(odds_b, 0);
+    }
+
+    // ── get_bets_by_address ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_bets_by_address_empty_when_no_bets() {
+        let (env, _, _) = setup_test_env();
+        let bettor = Address::new(&env, &[99u8; 32]);
+        let bets = MarketContract::get_bets_by_address(env.clone(), bettor);
+        assert_eq!(bets.len(), 0);
+    }
+
+    #[test]
+    fn test_get_bets_by_address_returns_placed_bets() {
+        let (env, bettor, _) = setup_test_env();
+
+        let bet_id_1 = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, TEST_MIN_BET);
+        let bet_id_2 = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterB, TEST_MIN_BET * 2);
+
+        let bets = MarketContract::get_bets_by_address(env.clone(), bettor.clone());
+        assert_eq!(bets.len(), 2);
+
+        let bet_1 = bets.get(0).unwrap();
+        assert_eq!(bet_1.bet_id, bet_id_1);
+        assert_eq!(bet_1.amount, TEST_MIN_BET);
+        assert_eq!(bet_1.side, BetSide::FighterA);
+
+        let bet_2 = bets.get(1).unwrap();
+        assert_eq!(bet_2.bet_id, bet_id_2);
+        assert_eq!(bet_2.amount, TEST_MIN_BET * 2);
+        assert_eq!(bet_2.side, BetSide::FighterB);
+    }
+
+    #[test]
+    fn test_get_bets_by_address_returns_bets_for_specific_address() {
+        let (env, bettor_a, _) = setup_test_env();
+        let bettor_b = Address::new(&env, &[5u8; 32]);
+
+        MarketContract::place_bet(env.clone(), bettor_a.clone(), BetSide::FighterA, TEST_MIN_BET);
+        MarketContract::place_bet(env.clone(), bettor_b.clone(), BetSide::FighterB, TEST_MIN_BET);
+
+        let bets_a = MarketContract::get_bets_by_address(env.clone(), bettor_a);
+        assert_eq!(bets_a.len(), 1);
+        assert_eq!(bets_a.get(0).unwrap().side, BetSide::FighterA);
+
+        let bets_b = MarketContract::get_bets_by_address(env.clone(), bettor_b);
+        assert_eq!(bets_b.len(), 1);
+        assert_eq!(bets_b.get(0).unwrap().side, BetSide::FighterB);
+    }
+
+    // ── Full lifecycle ──────────────────────────────────────────────────────
+
+    fn resolve_market_via_storage(env: &Env, outcome: Outcome) {
+        let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo)
+            .expect("market not initialized");
+        market.status = MarketStatus::Resolved;
+        market.outcome = Some(outcome);
+        env.storage().persistent().set(&DataKey::MarketInfo, &market);
+    }
+
+    fn lock_market_via_storage(env: &Env) {
+        let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo)
+            .expect("market not initialized");
+        market.status = MarketStatus::Locked;
+        env.storage().persistent().set(&DataKey::MarketInfo, &market);
+    }
+
+    #[test]
+    fn test_full_lifecycle_single_bettor_wins() {
+        let (env, bettor, _) = setup_test_env();
+
+        // Place bet on FighterA
+        let bet_id = MarketContract::place_bet(
+            env.clone(),
+            bettor.clone(),
+            BetSide::FighterA,
+            TEST_MIN_BET,
+        );
+
+        // Verify pools
+        let (pool_a, pool_b, _, _) = MarketContract::get_pool_odds(env.clone());
+        assert_eq!(pool_a, TEST_MIN_BET);
+        assert_eq!(pool_b, 0);
+
+        // Lock market (simulate)
+        lock_market_via_storage(&env);
+
+        // Resolve with FighterA winning
+        resolve_market_via_storage(&env, Outcome::FighterA);
+
+        // Claim winnings
+        let payout = MarketContract::claim_winnings(
+            env.clone(),
+            bettor.clone(),
+            bet_id.clone(),
+        );
+
+        // Since bettor has 100% of winning pool, payout should be (100 * total_pool * (10000-fee)) / (100 * 10000)
+        let expected_payout = TEST_MIN_BET * (10000 - 200) / 10000;
+        assert_eq!(payout, expected_payout, "Payout should be total minus fee");
+
+        // Verify bet is tracked in address index
+        let bets = MarketContract::get_bets_by_address(env.clone(), bettor);
+        assert_eq!(bets.len(), 1);
+    }
+
+    #[test]
+    fn test_full_lifecycle_two_bettors_different_sides() {
+        let (env, bettor_a, _) = setup_test_env();
+        let bettor_b = Address::new(&env, &[5u8; 32]);
+
+        // Bettor A bets 300 on FighterA
+        MarketContract::place_bet(env.clone(), bettor_a.clone(), BetSide::FighterA, 300);
+        // Bettor B bets 700 on FighterB
+        MarketContract::place_bet(env.clone(), bettor_b.clone(), BetSide::FighterB, 700);
+
+        // Verify odds
+        let (_, _, odds_a, odds_b) = MarketContract::get_pool_odds(env.clone());
+        assert_eq!(odds_a, 3000);
+        assert_eq!(odds_b, 7000);
+
+        // Lock and resolve with FighterA winning
+        lock_market_via_storage(&env);
+        resolve_market_via_storage(&env, Outcome::FighterA);
+
+        // Bettor A claims (winning pool = 300, bettor has all of it)
+        let payout_a = MarketContract::claim_winnings(
+            env.clone(),
+            bettor_a.clone(),
+            MarketContract::get_bets_by_address(env.clone(), bettor_a.clone()).get(0).unwrap().bet_id,
+        );
+        // Bettor A gets: (300 * 1000 * 9800) / (300 * 10000) = 980
+        assert_eq!(payout_a, 300 * 1000 * (10000 - 200) / (300 * 10000)); // = 980
+
+        // Bettor B tries to claim — should panic (losing side)
+        let bet_id_b = MarketContract::get_bets_by_address(env.clone(), bettor_b.clone()).get(0).unwrap().bet_id;
+        let result = std::panic::catch_unwind(|| {
+            MarketContract::claim_winnings(env.clone(), bettor_b.clone(), bet_id_b);
+        });
+        assert!(result.is_err(), "Losing bettor should not be able to claim");
+    }
+
+    #[test]
+    fn test_full_lifecycle_cancelled_market_refund() {
+        let (env, bettor, _) = setup_test_env();
+
+        let bet_id = MarketContract::place_bet(
+            env.clone(),
+            bettor.clone(),
+            BetSide::FighterA,
+            TEST_MIN_BET,
+        );
+
+        // Cancel market
+        let mut market: Market = env.storage().persistent().get(&DataKey::MarketInfo)
+            .expect("market not initialized");
+        market.status = MarketStatus::Cancelled;
+        market.outcome = Some(Outcome::NoContest);
+        env.storage().persistent().set(&DataKey::MarketInfo, &market);
+
+        // Claim refund
+        let refund = MarketContract::claim_refund(
+            env.clone(),
+            bettor.clone(),
+            bet_id.clone(),
+        );
+        assert_eq!(refund, TEST_MIN_BET, "Full refund on cancellation");
+
+        // Verify bets index still works
+        let bets = MarketContract::get_bets_by_address(env.clone(), bettor);
+        assert_eq!(bets.len(), 1);
+    }
+
+    #[test]
+    fn test_get_market_info_returns_market() {
+        let (env, _, _) = setup_test_env();
+        let market: Market = MarketContract::get_market_info(env.clone());
+        assert_eq!(market.market_id, Bytes::from_slice(&env, &[2u8; 32]));
+        assert_eq!(market.fighter_a.name, String::from_str(&env, "Fighter A"));
+        assert_eq!(market.fighter_b.name, String::from_str(&env, "Fighter B"));
+        assert_eq!(market.status, MarketStatus::Open);
+        assert_eq!(market.pool_a, 0);
+        assert_eq!(market.pool_b, 0);
+        assert_eq!(market.total_pool, 0);
+    }
+
+    #[test]
+    fn test_get_bet_returns_bet() {
+        let (env, bettor, _) = setup_test_env();
+        let bet_id = MarketContract::place_bet(
+            env.clone(),
+            bettor.clone(),
+            BetSide::FighterA,
+            TEST_MIN_BET,
+        );
+        let bet: Bet = MarketContract::get_bet(env.clone(), bet_id.clone());
+        assert_eq!(bet.bet_id, bet_id);
+        assert_eq!(bet.bettor, bettor);
+        assert_eq!(bet.side, BetSide::FighterA);
+        assert_eq!(bet.amount, TEST_MIN_BET);
+    }
+
+    #[test]
+    fn test_get_bet_panics_if_not_found() {
+        let (env, _, _) = setup_test_env();
+        let fake_id = Bytes::from_array(&env, &[0u8; 32]);
+        let result = std::panic::catch_unwind(|| {
+            MarketContract::get_bet(env.clone(), fake_id);
+        });
+        assert!(result.is_err(), "get_bet should panic for non-existent bet");
+    }
+
+    #[test]
+    fn test_multiple_bets_same_bettor_tracks_correctly() {
+        let (env, bettor, _) = setup_test_env();
+
+        let id1 = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, TEST_MIN_BET);
+        let id2 = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterB, TEST_MIN_BET * 2);
+        let id3 = MarketContract::place_bet(env.clone(), bettor.clone(), BetSide::FighterA, TEST_MIN_BET * 3);
+
+        let bets = MarketContract::get_bets_by_address(env.clone(), bettor);
+        assert_eq!(bets.len(), 3);
+        assert_eq!(bets.get(0).unwrap().bet_id, id1);
+        assert_eq!(bets.get(1).unwrap().bet_id, id2);
+        assert_eq!(bets.get(2).unwrap().bet_id, id3);
+
+        // Verify total pools
+        let market: Market = env.storage().persistent().get(&DataKey::MarketInfo).unwrap();
+        assert_eq!(market.pool_a, TEST_MIN_BET + TEST_MIN_BET * 3);
+        assert_eq!(market.pool_b, TEST_MIN_BET * 2);
     }
 }
