@@ -409,12 +409,19 @@ impl MarketFactory {
 
     /// Retrieves the address of a market by ID.
     ///
-    /// # Errors
-    /// - `MarketNotFound`: Market ID does not exist
-    pub fn get_market_address(env: Env, market_id: u64) -> Result<Address, ContractError> {
+    /// # Panics
+    /// - Panics with "market not found" if market_id does not exist
+    pub fn get_market_address(env: Env, market_id: u64) -> Address {
         let map: Map<u64, Address> =
             env.storage().persistent().get(&MARKET_MAP).unwrap_or_else(|| Map::new(&env));
-        map.get(market_id).ok_or(ContractError::MarketNotFound)
+        map.get(market_id).unwrap_or_else(|| panic!("market {} not found", market_id))
+    }
+
+    /// Returns whether a market with the given ID exists.
+    pub fn market_exists(env: Env, market_id: u64) -> bool {
+        let map: Map<u64, Address> =
+            env.storage().persistent().get(&MARKET_MAP).unwrap_or_else(|| Map::new(&env));
+        map.get(market_id).is_some()
     }
 
     /// Lists markets with pagination, returning `(market_id, status)` pairs.
