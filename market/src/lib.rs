@@ -377,6 +377,13 @@ impl MarketContract {
             panic!("market not locked");
         }
 
+        if market.oracle_address != oracle {
+            panic!("not authorized oracle");
+        }
+
+        // Set resolved_at timestamp for dispute window enforcement
+        market.resolved_at = env.ledger().timestamp();
+
         // Draw reuses the Cancelled path so both sides receive full refunds with no fee.
         market.status = match outcome {
             Outcome::NoContest | Outcome::Draw => MarketStatus::Cancelled,
@@ -508,43 +515,6 @@ impl MarketContract {
     /// - `bettor` is not the owner of the bet.
     /// - The market status is not `Cancelled` and outcome is not `NoContest`.
     /// - The bet has already been claimed.
-    pub fn claim_refund(env: Env, bettor: Address, bet_id: Bytes) -> i128 {
-        bettor.require_auth();
-
-        let bet: Bet = env.storage().persistent()
-    pub fn resolve_market(env: Env, oracle: Address, outcome: Outcome) {
-        oracle.require_auth();
-
-        let mut market = Self::read_market(&env);
-
-        if market.status != MarketStatus::Locked {
-            panic!("market not locked");
-        }
-
-        if market.oracle_address != oracle {
-            panic!("not authorized oracle");
-        }
-
-        market.outcome = Some(outcome.clone());
-        market.resolved_at = env.ledger().timestamp();
-
-        match outcome {
-            Outcome::Draw | Outcome::NoContest => {
-                market.status = MarketStatus::Cancelled;
-            }
-            _ => {
-                market.status = MarketStatus::Resolved;
-            }
-        }
-
-        Self::write_market(&env, &market);
-
-        env.events().publish(
-            (Symbol::new(&env, "MarketResolved"),),
-            (market.market_id.clone(), market.outcome.clone(), market.resolved_at),
-        );
-    }
-
     /// Full refund for a bet when market is Cancelled. No protocol fee.
     pub fn claim_refund(env: Env, bettor: Address, bet_id: Bytes) -> i128 {
         bettor.require_auth();
