@@ -99,34 +99,6 @@ MARKET_WASM_HASH=$(soroban contract install \
 
 echo "    Market WASM hash: $MARKET_WASM_HASH"
 
-# ─── DEPLOY & INITIALIZE MARKET FACTORY ───────────────────────────────────────
-
-echo ""
-echo "==> Deploying MarketFactory..."
-FACTORY_ID=$(soroban contract deploy \
-  --wasm       "$WASM_DIR/market_factory.optimized.wasm" \
-  --source     "$ADMIN_SECRET" \
-  --network    "$NETWORK" \
-  --network-passphrase "$NETWORK_PASSPHRASE" \
-  --rpc-url    "$NETWORK_URL")
-
-echo "    MarketFactory contract ID: $FACTORY_ID"
-
-echo ""
-echo "==> Initializing MarketFactory..."
-soroban contract invoke \
-  --id         "$FACTORY_ID" \
-  --source     "$ADMIN_SECRET" \
-  --network    "$NETWORK" \
-  --network-passphrase "$NETWORK_PASSPHRASE" \
-  --rpc-url    "$NETWORK_URL" \
-  -- initialize \
-  --admin         "$ADMIN_PUBKEY" \
-  --fee-collector "PLACEHOLDER" \
-  --default-fee-bp 200 \
-  --min-bet       1000000 \
-  --max-bet       100000000000
-
 # ─── DEPLOY & INITIALIZE TREASURY ─────────────────────────────────────────────
 
 echo ""
@@ -141,7 +113,7 @@ TREASURY_ID=$(soroban contract deploy \
 echo "    Treasury contract ID: $TREASURY_ID"
 
 echo ""
-echo "==> Initializing Treasury with Factory address..."
+echo "==> Initializing Treasury (with placeholder factory, updated after factory deploys)..."
 soroban contract invoke \
   --id         "$TREASURY_ID" \
   --source     "$ADMIN_SECRET" \
@@ -150,7 +122,36 @@ soroban contract invoke \
   --rpc-url    "$NETWORK_URL" \
   -- initialize \
   --admin      "$ADMIN_PUBKEY" \
-  --factory    "$FACTORY_ID"
+  --factory    "$ADMIN_PUBKEY"
+
+# ─── DEPLOY & INITIALIZE MARKET FACTORY ───────────────────────────────────────
+# Deployed after Treasury so fee_collector can point to the real Treasury address.
+
+echo ""
+echo "==> Deploying MarketFactory..."
+FACTORY_ID=$(soroban contract deploy \
+  --wasm       "$WASM_DIR/market_factory.optimized.wasm" \
+  --source     "$ADMIN_SECRET" \
+  --network    "$NETWORK" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  --rpc-url    "$NETWORK_URL")
+
+echo "    MarketFactory contract ID: $FACTORY_ID"
+
+echo ""
+echo "==> Initializing MarketFactory with real Treasury as fee-collector..."
+soroban contract invoke \
+  --id         "$FACTORY_ID" \
+  --source     "$ADMIN_SECRET" \
+  --network    "$NETWORK" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  --rpc-url    "$NETWORK_URL" \
+  -- initialize \
+  --admin         "$ADMIN_PUBKEY" \
+  --fee-collector "$TREASURY_ID" \
+  --default-fee-bp 200 \
+  --min-bet       1000000 \
+  --max-bet       100000000000
 
 # ─── WIRE FACTORY WITH MARKET WASM ────────────────────────────────────────────
 
