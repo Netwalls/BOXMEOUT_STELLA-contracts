@@ -1,17 +1,33 @@
 #!/usr/bin/env bash
-# Deploy MarketFactory and Treasury to Stellar Testnet.
-# Requirements: Rust + wasm32 target, Stellar CLI (soroban), funded Testnet keypair.
+# ==============================================================================
+# BOXMEOUT — Deploy all contracts to Stellar Testnet
+# ==============================================================================
+#
+# Deploys Market (WASM), MarketFactory, and Treasury to Stellar Testnet in a
+# single command. Wires all contract addresses together so they can communicate.
+#
+# Requirements:
+#   - Rust + wasm32-unknown-unknown target
+#   - Stellar CLI (soroban) v21+
+#   - Funded Testnet keypair
+#   - jq (for JSON output)
 #
 # Usage:
-#   ADMIN_SECRET=S... ./deploy_testnet.sh
+#   ADMIN_SECRET=SABC... ./deploy_testnet.sh
 #
-# Outputs contract IDs to stdout and saves them to .env.testnet in this directory.
+# Output:
+#   - Contract IDs printed to stdout
+#   - .env.testnet (shell env file)
+#   - ../../config.json (JSON consumable by backend/frontend)
+# ==============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTRACTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env.testnet"
+JSON_FILE="$PROJECT_ROOT/config.json"
 
 # ─── VALIDATE ENVIRONMENT ─────────────────────────────────────────────────────
 
@@ -21,7 +37,7 @@ if [[ -z "${ADMIN_SECRET:-}" ]]; then
   exit 1
 fi
 
-for cmd in cargo soroban; do
+for cmd in cargo soroban jq; do
   if ! command -v "$cmd" &>/dev/null; then
     echo "ERROR: '$cmd' is not installed or not in PATH."
     exit 1
@@ -29,10 +45,9 @@ for cmd in cargo soroban; do
 done
 
 NETWORK="testnet"
+NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 NETWORK_URL="https://soroban-testnet.stellar.org"
-ADMIN_PUBKEY=$(stellar keys address "$ADMIN_SECRET" 2>/dev/null || \
-               soroban keys address "$ADMIN_SECRET" 2>/dev/null || \
-               echo "")
+ADMIN_PUBKEY=$(soroban keys address "$ADMIN_SECRET" 2>/dev/null || echo "")
 
 if [[ -z "$ADMIN_PUBKEY" ]]; then
   echo "ERROR: Could not derive public key from ADMIN_SECRET."
@@ -44,7 +59,7 @@ echo "==> Admin public key: $ADMIN_PUBKEY"
 # ─── BUILD ────────────────────────────────────────────────────────────────────
 
 echo ""
-echo "==> Building contracts (release, wasm32-unknown-unknown)..."
+echo "==> Building all contracts (release, wasm32-unknown-unknown)..."
 cd "$CONTRACTS_DIR"
 cargo build --release --target wasm32-unknown-unknown 2>&1
 
@@ -54,7 +69,7 @@ WASM_DIR="$CONTRACTS_DIR/target/wasm32-unknown-unknown/release"
 
 echo ""
 echo "==> Optimizing WASM binaries..."
-for contract in treasury market_factory; do
+for contract in market treasury market_factory; do
   WASM_IN="$WASM_DIR/${contract}.wasm"
   WASM_OUT="$WASM_DIR/${contract}.optimized.wasm"
 
@@ -69,32 +84,22 @@ for contract in treasury market_factory; do
   echo "    Optimized: $WASM_OUT"
 done
 
-# ─── DEPLOY TREASURY ──────────────────────────────────────────────────────────
+# ─── INSTALL MARKET WASM ──────────────────────────────────────────────────────
+# Upload the Market contract WASM to the network so MarketFactory can deploy
+# new instances from it.
 
 echo ""
-echo "==> Deploying Treasury..."
-TREASURY_ID=$(soroban contract deploy \
-  --wasm       "$WASM_DIR/treasury.optimized.wasm" \
+echo "==> Installing Market contract WASM on-chain..."
+MARKET_WASM_HASH=$(soroban contract install \
+  --wasm       "$WASM_DIR/market.optimized.wasm" \
   --source     "$ADMIN_SECRET" \
   --network    "$NETWORK" \
-  --network-passphrase "Test SDF Network ; September 2015" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
   --rpc-url    "$NETWORK_URL")
 
-echo "    Treasury contract ID: $TREASURY_ID"
+echo "    Market WASM hash: $MARKET_WASM_HASH"
 
-echo ""
-echo "==> Initializing Treasury..."
-soroban contract invoke \
-  --id         "$TREASURY_ID" \
-  --source     "$ADMIN_SECRET" \
-  --network    "$NETWORK" \
-  --network-passphrase "Test SDF Network ; September 2015" \
-  --rpc-url    "$NETWORK_URL" \
-  -- initialize \
-  --admin      "$ADMIN_PUBKEY" \
-  --factory    "PLACEHOLDER_FACTORY_ID"
-
-# ─── DEPLOY MARKET FACTORY ────────────────────────────────────────────────────
+# ─── DEPLOY & INITIALIZE MARKET FACTORY ───────────────────────────────────────
 
 echo ""
 echo "==> Deploying MarketFactory..."
@@ -102,7 +107,7 @@ FACTORY_ID=$(soroban contract deploy \
   --wasm       "$WASM_DIR/market_factory.optimized.wasm" \
   --source     "$ADMIN_SECRET" \
   --network    "$NETWORK" \
-  --network-passphrase "Test SDF Network ; September 2015" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
   --rpc-url    "$NETWORK_URL")
 
 echo "    MarketFactory contract ID: $FACTORY_ID"
@@ -113,24 +118,60 @@ soroban contract invoke \
   --id         "$FACTORY_ID" \
   --source     "$ADMIN_SECRET" \
   --network    "$NETWORK" \
-  --network-passphrase "Test SDF Network ; September 2015" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
   --rpc-url    "$NETWORK_URL" \
   -- initialize \
   --admin         "$ADMIN_PUBKEY" \
-  --fee-collector "$TREASURY_ID" \
+  --fee-collector "PLACEHOLDER" \
   --default-fee-bp 200 \
   --min-bet       1000000 \
   --max-bet       100000000000
 
-# ─── RE-INITIALIZE TREASURY WITH REAL FACTORY ─────────────────────────────────
-# Treasury initialize is idempotent-guard so we cannot call it twice.
-# If you need to update the factory reference post-deploy, upgrade the contract
-# or add an update_factory admin function before production deployment.
+# ─── DEPLOY & INITIALIZE TREASURY ─────────────────────────────────────────────
+
+echo ""
+echo "==> Deploying Treasury..."
+TREASURY_ID=$(soroban contract deploy \
+  --wasm       "$WASM_DIR/treasury.optimized.wasm" \
+  --source     "$ADMIN_SECRET" \
+  --network    "$NETWORK" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  --rpc-url    "$NETWORK_URL")
+
+echo "    Treasury contract ID: $TREASURY_ID"
+
+echo ""
+echo "==> Initializing Treasury with Factory address..."
+soroban contract invoke \
+  --id         "$TREASURY_ID" \
+  --source     "$ADMIN_SECRET" \
+  --network    "$NETWORK" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  --rpc-url    "$NETWORK_URL" \
+  -- initialize \
+  --admin      "$ADMIN_PUBKEY" \
+  --factory    "$FACTORY_ID"
+
+# ─── WIRE FACTORY WITH MARKET WASM ────────────────────────────────────────────
+
+echo ""
+echo "==> Setting Market WASM hash on Factory..."
+soroban contract invoke \
+  --id         "$FACTORY_ID" \
+  --source     "$ADMIN_SECRET" \
+  --network    "$NETWORK" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  --rpc-url    "$NETWORK_URL" \
+  -- update_market_wasm \
+  --admin      "$ADMIN_PUBKEY" \
+  --new-wasm-hash "$MARKET_WASM_HASH"
 
 # ─── SAVE OUTPUT ──────────────────────────────────────────────────────────────
 
 echo ""
-echo "==> Saving contract IDs to $ENV_FILE..."
+echo "==> Saving contract IDs..."
+
+# Shell env file for scripts
 cat > "$ENV_FILE" <<ENVFILE
 # BOXMEOUT Stellar Testnet — generated by deploy_testnet.sh
 NETWORK=testnet
@@ -138,13 +179,39 @@ RPC_URL=${NETWORK_URL}
 ADMIN_PUBKEY=${ADMIN_PUBKEY}
 TREASURY_CONTRACT_ID=${TREASURY_ID}
 FACTORY_CONTRACT_ID=${FACTORY_ID}
+MARKET_WASM_HASH=${MARKET_WASM_HASH}
 ENVFILE
 
+# JSON file consumable by backend/frontend
+cat > "$JSON_FILE" <<JSONFILE
+{
+  "network": "testnet",
+  "rpcUrl": "${NETWORK_URL}",
+  "networkPassphrase": "${NETWORK_PASSPHRASE}",
+  "adminPublicKey": "${ADMIN_PUBKEY}",
+  "contracts": {
+    "treasury": "${TREASURY_ID}",
+    "marketFactory": "${FACTORY_ID}",
+    "marketWasmHash": "${MARKET_WASM_HASH}"
+  },
+  "protocolConfig": {
+    "defaultFeeBp": 200,
+    "minBet": 1000000,
+    "maxBet": 100000000000
+  }
+}
+JSONFILE
+
 echo ""
-echo "======================================================"
-echo "  TREASURY_CONTRACT_ID = $TREASURY_ID"
-echo "  FACTORY_CONTRACT_ID  = $FACTORY_ID"
-echo "======================================================"
+echo "============================================================"
+echo "  DEPLOYMENT COMPLETE"
+echo "============================================================"
+echo "  Treasury:         $TREASURY_ID"
+echo "  MarketFactory:    $FACTORY_ID"
+echo "  Market WASM hash: $MARKET_WASM_HASH"
+echo "============================================================"
 echo ""
-echo "Contract IDs saved to: $ENV_FILE"
-echo "Add contracts/scripts/.env.testnet to .gitignore if not already done."
+echo "  Shell env file: $ENV_FILE"
+echo "  JSON config:    $JSON_FILE"
+echo ""
+echo "Backend/frontend can import config.json for contract addresses."
