@@ -62,7 +62,6 @@ pub struct Market {
     pub total_pool: i128,
     pub protocol_fee_bp: u32,
     pub oracle_address: Address,
-    pub outcome: SettledOutcome,
     pub outcome: Option<Outcome>,
     pub fee_collector_address: Address,
     pub resolved_at: u64,

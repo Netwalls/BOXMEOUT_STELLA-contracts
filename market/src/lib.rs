@@ -18,12 +18,12 @@ const NEXT_BET_ID_KEY: &str = "next_bet_id";
 // DisputeRaised        -> bool
 // DisputeReason        -> Bytes
 
-mod types;
+pub mod types;
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, Address, Bytes, Env, Symbol, Vec,
 };
-use types::{Bet, BetSide, Fighter, Market, MarketStatus, Outcome, ProtocolConfig, SettledOutcome};
+use types::{Bet, BetSide, Fighter, Market, MarketStatus, Outcome, ProtocolConfig};
 
 // ─── STORAGE KEYS ─────────────────────────────────────────────────────────────
 // DataKey::MarketInfo     -> Market
