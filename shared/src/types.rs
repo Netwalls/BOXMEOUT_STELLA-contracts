@@ -73,6 +73,17 @@ pub struct Bet {
 
 #[contracttype]
 #[derive(Clone, Debug)]
+pub struct BetRecord {
+    pub bettor:    Address,
+    pub market_id: u64,
+    pub side:      BetSide,
+    pub amount:    i128,
+    pub placed_at: u64,
+    pub claimed:   bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct ClaimReceipt {
     pub bet_id:     Bytes,
     pub bettor:     Address,
