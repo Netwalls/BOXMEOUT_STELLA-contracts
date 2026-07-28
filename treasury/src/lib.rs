@@ -8,21 +8,11 @@ use soroban_sdk::{
 // "ADMIN"           -> Address
 // "FACTORY"         -> Address
 // "TOKEN"           -> Address  (XLM token contract)
+// "FEE_BPS"         -> u32 (fee in basis points)
+// "FEE_RECIPIENT"   -> Address
 // "BALANCE"         -> i128
 // "TOTAL_FEES"      -> i128
-// "FEE_BPS"         -> u32 (protocol fee rate in basis points)
 // "WITHDRAWAL_LOG"  -> Vec<(Address, i128, u64)>
-
-#[contracttype]
-enum DataKey {
-    Admin,
-    Factory,
-    Token,
-    Balance,
-    TotalFeesEarned,
-    FeeBps,
-    WithdrawalLog,
-}
 
 fn key_admin(env: &Env) -> Symbol {
     Symbol::new(env, "ADMIN")
@@ -36,16 +26,20 @@ fn key_token(env: &Env) -> Symbol {
     Symbol::new(env, "TOKEN")
 }
 
+fn key_fee_bps(env: &Env) -> Symbol {
+    Symbol::new(env, "FEE_BPS")
+}
+
+fn key_fee_recipient(env: &Env) -> Symbol {
+    Symbol::new(env, "FEE_RECIPIENT")
+}
+
 fn key_balance(env: &Env) -> Symbol {
     Symbol::new(env, "BALANCE")
 }
 
 fn key_total_fees(env: &Env) -> Symbol {
     Symbol::new(env, "TOTAL_FEES")
-}
-
-fn key_fee_bps(env: &Env) -> Symbol {
-    Symbol::new(env, "FEE_BPS")
 }
 
 fn key_wlog(env: &Env) -> Symbol {
@@ -57,103 +51,83 @@ pub struct Treasury;
 
 #[contractimpl]
 impl Treasury {
-    /// Sets up the Treasury with an admin and an authorized factory address.
+    /// Initializes the Treasury with admin, fee configuration, and token address.
     ///
-    /// Must be called once immediately after deployment. Initializes `BALANCE` and
-    /// `TOTAL_FEES_EARNED` to zero, sets `FEE_BPS` to default fee rate, and sets up
-    /// an empty `WITHDRAWAL_LOG`.
+    /// Must be called once immediately after deployment. Stores admin address,
+    /// fee basis points, fee recipient, token address, and initializes balance
+    /// tracking and withdrawal log.
     ///
     /// # Arguments
     ///
     /// * `env` - The Soroban execution environment.
     /// * `admin` - Address of the treasury administrator, authorized to withdraw funds.
-    /// * `factory` - Address of the `MarketFactory` contract whose markets are permitted
-    ///   to call [`deposit_fees`].
+    /// * `fee_bps` - Protocol fee in basis points (e.g., 200 = 2%). Must not exceed 1000 (10%).
+    /// * `fee_recipient` - Address that receives protocol fees.
+    /// * `factory` - Address of the `MarketFactory` contract.
     /// * `token` - Address of the XLM token contract.
     ///
     /// # Panics
     ///
-    /// Panics if the treasury has already been initialized.
-    pub fn initialize(env: Env, admin: Address, factory: Address, token: Address) {
+    /// Panics if:
+    /// - The treasury has already been initialized.
+    /// - `fee_bps` exceeds 1000 (10%).
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        fee_bps: u32,
+        fee_recipient: Address,
+        factory: Address,
+        token: Address,
+    ) {
         if env.storage().persistent().has(&key_admin(&env)) {
             panic!("already initialized");
         }
+
+        // Validate fee_bps does not exceed 10% (1000 basis points)
+        if fee_bps > 1000 {
+            panic!("fee_bps exceeds maximum of 1000 (10%)");
+        }
+
         env.storage().persistent().set(&key_admin(&env), &admin);
+        env.storage().persistent().set(&key_fee_bps(&env), &fee_bps);
+        env.storage()
+            .persistent()
+            .set(&key_fee_recipient(&env), &fee_recipient);
         env.storage().persistent().set(&key_factory(&env), &factory);
         env.storage().persistent().set(&key_token(&env), &token);
         env.storage().persistent().set(&key_balance(&env), &0i128);
-        env.storage().persistent().set(&key_total_fees(&env), &0i128);
-        env.storage().persistent().set(&key_fee_bps(&env), &0u32);
+        env.storage()
+            .persistent()
+            .set(&key_total_fees(&env), &0i128);
         env.storage()
             .persistent()
             .set(&key_wlog(&env), &Vec::<(Address, i128, u64)>::new(&env));
     }
 
-    /// Sets the protocol fee rate in basis points.
-    ///
-    /// Only callable by the admin. Rejects values that exceed a reasonable ceiling (e.g., 10000 = 100%).
-    /// Emits a `FeeBpsUpdated` event with the new fee rate.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    /// * `admin` - Admin address. Must authorize this call.
-    /// * `fee_bps` - New fee rate in basis points. Must not exceed 10000.
-    ///
-    /// # Panics
-    ///
-    /// Panics if:
-    /// - `admin` has not authorized the call.
-    /// - `admin` is not the stored admin address.
-    /// - `fee_bps` exceeds 10000 (the ceiling).
-    pub fn set_fee_bps(env: Env, admin: Address, fee_bps: u32) {
-        admin.require_auth();
-
-        let stored_admin: Address = env
-            .storage()
-            .persistent()
-            .get(&key_admin(&env))
-            .expect("not initialized");
-        if stored_admin != admin {
-            panic!("not admin");
-        }
-
-        if fee_bps > 10000 {
-            panic!("fee_bps exceeds ceiling");
-        }
-
-        env.storage().persistent().set(&key_fee_bps(&env), &fee_bps);
-
-        env.events().publish(
-            (Symbol::new(&env, "FeeBpsUpdated"),),
-            fee_bps,
-        );
-    }
-
     /// Receives protocol fees from a registered `Market` contract.
     ///
-    /// Verifies the caller is the `Market` contract registered under `market_id`
-    /// in the factory via a cross-contract call. Adds `amount` to both `BALANCE`
-    /// and `TOTAL_FEES_EARNED`. Emits a `FeesDeposited` event.
+    /// Only callable by a Market contract address registered with the factory.
+    /// Increments the per-market escrow balance and emits a `BetDeposited` event.
     ///
     /// # Arguments
     ///
     /// * `env` - The Soroban execution environment.
-    /// * `market_id` - Identifier of the market depositing fees, used to verify
-    ///   the caller against the factory registry.
-    /// * `amount` - Amount of XLM fees to deposit, in stroops.
+    /// * `from_market` - Address of the Market contract depositing bets (must be authorized).
+    /// * `market_id` - Identifier of the market, used for per-market escrow tracking.
+    /// * `amount` - Amount of XLM to deposit into escrow, in stroops.
     ///
     /// # Panics
     ///
     /// Panics if:
     /// - The invoking contract address does not match the address registered for `market_id` in the factory.
-    /// - The factory address has not been configured.
     pub fn deposit_fees(env: Env, market_id: Bytes, amount: i128) {
         let factory: Address = env
             .storage()
             .persistent()
             .get(&key_factory(&env))
-            .expect("factory not set");
+            .expect("not initialized");
+
+        let caller = env.current_contract_address();
 
         let caller = env.current_contract_address();
 
@@ -189,11 +163,10 @@ impl Treasury {
         );
     }
 
-    /// Transfers collected fees to recipient. Only callable by admin or fee_recipient.
+    /// Transfers collected fees from the treasury to a recipient address.
     ///
     /// Validates that `amount ≤ BALANCE` and deducts it before transferring XLM.
     /// Appends an entry to `WITHDRAWAL_LOG`. Emits a `FeesWithdrawn` event.
-    /// Returns the amount withdrawn.
     ///
     /// # Arguments
     ///
@@ -207,7 +180,7 @@ impl Treasury {
     /// Panics if:
     /// - `admin` has not authorized the call.
     /// - `amount` exceeds the current `BALANCE`.
-    pub fn withdraw_fees(env: Env, admin: Address, recipient: Address, amount: i128) -> i128 {
+    pub fn withdraw_fees(env: Env, admin: Address, recipient: Address, amount: i128) {
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -259,8 +232,7 @@ impl Treasury {
         amount
     }
 
-    /// Emergency drain — moves ALL funds to recipient.
-    /// Only callable when protocol is paused. Requires admin authorization.
+    /// Drains all treasury funds to `recipient` in an emergency.
     ///
     /// Only callable while the protocol is paused (verified via cross-contract call
     /// to the factory's `get_config`). Resets `BALANCE` to zero, logs the drain,
@@ -337,8 +309,8 @@ impl Treasury {
         env.storage().persistent().set(&key_wlog(&env), &log);
 
         env.events().publish(
-            (Symbol::new(&env, "EmergencyDrain"), recipient.clone()),
-            amount,
+            (symbol_short!("EmrgDrain"),),
+            (recipient, amount, ts),
         );
 
         amount
@@ -348,10 +320,6 @@ impl Treasury {
     ///
     /// Read-only — does not modify state. Matches the sum of all deposits
     /// minus all withdrawals.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
     ///
     /// # Returns
     ///
@@ -363,32 +331,9 @@ impl Treasury {
             .unwrap_or(0)
     }
 
-    /// Returns the current protocol fee rate in basis points.
-    ///
-    /// Read-only — does not modify state.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    ///
-    /// # Returns
-    ///
-    /// Returns the current `FEE_BPS` value. Returns `0` if never set.
-    pub fn get_fee_bps(env: Env) -> u32 {
-        env.storage()
-            .persistent()
-            .get(&key_fee_bps(&env))
-            .unwrap_or(0)
-    }
-
     /// Returns lifetime cumulative fees collected.
     ///
-    /// This value is never decremented by withdrawals — it is a running total of
-    /// all fees ever received. Read-only — does not modify state.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
+    /// Read-only — does not modify state.
     ///
     /// # Returns
     ///
@@ -405,10 +350,6 @@ impl Treasury {
     /// Each entry is a tuple of `(recipient, amount, timestamp)`. Read-only —
     /// does not modify state.
     ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    ///
     /// # Returns
     ///
     /// Returns a [`Vec`] of `(Address, i128, u64)` tuples, one per withdrawal,
@@ -418,6 +359,34 @@ impl Treasury {
             .persistent()
             .get(&key_wlog(&env))
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Returns the stored fee basis points.
+    ///
+    /// Read-only — does not modify state.
+    ///
+    /// # Returns
+    ///
+    /// Returns the `FEE_BPS` value set during initialization.
+    pub fn get_fee_bps(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&key_fee_bps(&env))
+            .unwrap_or(0)
+    }
+
+    /// Returns the stored fee recipient address.
+    ///
+    /// Read-only — does not modify state.
+    ///
+    /// # Returns
+    ///
+    /// Returns the `FEE_RECIPIENT` address set during initialization.
+    pub fn get_fee_recipient(env: Env) -> Address {
+        env.storage()
+            .persistent()
+            .get(&key_fee_recipient(&env))
+            .expect("not initialized")
     }
 }
 
@@ -430,21 +399,24 @@ mod tests {
     use soroban_sdk::IntoVal;
 
     #[test]
-    fn test_initialize() {
+    fn test_initialize_success() {
         let env = create_test_env();
         let admin = create_test_address(&env);
         let factory = create_test_address(&env);
+        let fee_recipient = create_test_address(&env);
         let token = create_test_address(&env);
 
         let contract_id = env.register_contract(None, Treasury);
         let client = TreasuryClient::new(&env, &contract_id);
 
-        client.initialize(&admin, &factory, &token);
+        client.initialize(&admin, &200u32, &fee_recipient, &factory, &token);
 
         assert_eq!(client.get_balance(), 0);
         assert_eq!(client.get_total_fees_earned(), 0);
         assert_eq!(client.get_fee_bps(), 0);
         assert_eq!(client.get_withdrawal_log().len(), 0);
+        assert_eq!(client.get_fee_bps(), 200);
+        assert_eq!(client.get_fee_recipient(), fee_recipient);
     }
 
     #[test]
@@ -453,79 +425,43 @@ mod tests {
         let env = create_test_env();
         let admin = create_test_address(&env);
         let factory = create_test_address(&env);
+        let fee_recipient = create_test_address(&env);
         let token = create_test_address(&env);
 
         let contract_id = env.register_contract(None, Treasury);
         let client = TreasuryClient::new(&env, &contract_id);
 
-        client.initialize(&admin, &factory, &token);
-        client.initialize(&admin, &factory, &token);
+        client.initialize(&admin, &200u32, &fee_recipient, &factory, &token);
+        client.initialize(&admin, &200u32, &fee_recipient, &factory, &token); // must panic
     }
 
     #[test]
-    fn test_set_fee_bps_success() {
+    #[should_panic(expected = "fee_bps exceeds maximum of 1000 (10%)")]
+    fn test_initialize_fee_bps_exceeds_maximum() {
         let env = create_test_env();
-        env.mock_all_auths();
-
         let admin = create_test_address(&env);
         let factory = create_test_address(&env);
+        let fee_recipient = create_test_address(&env);
         let token = create_test_address(&env);
 
         let contract_id = env.register_contract(None, Treasury);
         let client = TreasuryClient::new(&env, &contract_id);
 
-        client.initialize(&admin, &factory, &token);
-        client.set_fee_bps(&admin, &200u32);
-
-        assert_eq!(client.get_fee_bps(), 200);
+        client.initialize(&admin, &1001u32, &fee_recipient, &factory, &token);
     }
 
     #[test]
-    #[should_panic(expected = "fee_bps exceeds ceiling")]
-    fn test_set_fee_bps_exceeds_ceiling() {
+    fn test_initialize_fee_bps_at_maximum() {
         let env = create_test_env();
-        env.mock_all_auths();
-
         let admin = create_test_address(&env);
         let factory = create_test_address(&env);
+        let fee_recipient = create_test_address(&env);
         let token = create_test_address(&env);
 
         let contract_id = env.register_contract(None, Treasury);
         let client = TreasuryClient::new(&env, &contract_id);
 
-        client.initialize(&admin, &factory, &token);
-        client.set_fee_bps(&admin, &10001u32);
-    }
-
-    #[test]
-    #[should_panic(expected = "not admin")]
-    fn test_set_fee_bps_not_admin_panics() {
-        let env = create_test_env();
-        env.mock_all_auths();
-
-        let admin = create_test_address(&env);
-        let factory = create_test_address(&env);
-        let token = create_test_address(&env);
-        let attacker = create_test_address(&env);
-
-        let contract_id = env.register_contract(None, Treasury);
-        let client = TreasuryClient::new(&env, &contract_id);
-
-        client.initialize(&admin, &factory, &token);
-        client.set_fee_bps(&attacker, &200u32);
-    }
-
-    #[test]
-    fn test_get_balance_empty() {
-        let env = create_test_env();
-        let admin = create_test_address(&env);
-        let factory = create_test_address(&env);
-        let token = create_test_address(&env);
-
-        let contract_id = env.register_contract(None, Treasury);
-        let client = TreasuryClient::new(&env, &contract_id);
-
-        client.initialize(&admin, &factory, &token);
-        assert_eq!(client.get_balance(), 0);
+        client.initialize(&admin, &1000u32, &fee_recipient, &factory, &token);
+        assert_eq!(client.get_fee_bps(), 1000);
     }
 }
