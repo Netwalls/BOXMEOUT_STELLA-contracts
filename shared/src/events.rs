@@ -28,10 +28,10 @@ pub fn emit_market_locked(env: &Env, market_id: u64) {
 /// Emits a `market_resolved` event when an oracle submits a final outcome.
 ///
 /// Topics: `(Symbol("market_resolved"), market_id)`
-/// Data:   `(outcome, oracle_address)`
-pub fn emit_market_resolved(env: &Env, market_id: u64, outcome: Outcome, oracle_address: Address) {
+/// Data:   `(outcome, resolution_time)`
+pub fn emit_market_resolved(env: &Env, market_id: u64, outcome: Outcome, resolution_time: u64) {
     let topics = (Symbol::new(env, "market_resolved"), market_id);
-    env.events().publish(topics, (outcome, oracle_address));
+    env.events().publish(topics, (outcome, resolution_time));
 }
 
 /// Emits a `bet_placed` event when a bettor places a bet.
@@ -77,6 +77,15 @@ pub fn emit_market_cancelled(env: &Env, market_id: u64, reason: String) {
 pub fn emit_market_disputed(env: &Env, market_id: u64, reason: String) {
     let topics = (Symbol::new(env, "market_disputed"), market_id);
     env.events().publish(topics, reason);
+}
+
+/// Emits a `resolution_disputed` event when a resolution is disputed.
+///
+/// Topics: `(Symbol("resolution_disputed"), market_id)`
+/// Data:   `(disputer, reason)`
+pub fn emit_resolution_disputed(env: &Env, market_id: u64, disputer: Address, reason: String) {
+    let topics = (Symbol::new(env, "resolution_disputed"), market_id);
+    env.events().publish(topics, (disputer, reason));
 }
 
 /// Emits a `dispute_resolved` event when an admin finalises a disputed outcome.
@@ -241,15 +250,15 @@ mod tests {
     #[test]
     fn test_emit_market_resolved() {
         let (env, id) = env();
-        let oracle = addr(&env);
-        env.as_contract(&id, || { emit_market_resolved(&env, 3, Outcome::FighterA, oracle.clone()); });
+        let resolution_time = 1_000_000u64;
+        env.as_contract(&id, || { emit_market_resolved(&env, 3, Outcome::FighterA, resolution_time); });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "market_resolved"));
-        let (ev_outcome, ev_oracle): (Outcome, Address) =
+        let (ev_outcome, ev_time): (Outcome, u64) =
             TryFromVal::try_from_val(&env, &ev.2).unwrap();
         assert_eq!(ev_outcome, Outcome::FighterA);
-        assert_eq!(ev_oracle, oracle);
+        assert_eq!(ev_time, resolution_time);
     }
 
     // ── bet_placed ───────────────────────────────────────────────────────────
@@ -437,6 +446,24 @@ mod tests {
             TryFromVal::try_from_val(&env, &ev.2).unwrap();
         assert_eq!(ev_param, str(&env, "fee_bps"));
         assert_eq!(ev_value, 300_i128);
+    }
+
+    // ── resolution_disputed ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_emit_resolution_disputed() {
+        let (env, id) = env();
+        let disputer = addr(&env);
+        env.as_contract(&id, || { emit_resolution_disputed(&env, 11, disputer.clone(), str(&env, "oracle_error")); });
+
+        let ev = sole_event!(env);
+        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "resolution_disputed"));
+        let topic_id: u64 = u64::try_from_val(&env, &ev.1.get(1).unwrap()).unwrap();
+        assert_eq!(topic_id, 11_u64);
+        let (ev_disputer, ev_reason): (Address, soroban_sdk::String) =
+            TryFromVal::try_from_val(&env, &ev.2).unwrap();
+        assert_eq!(ev_disputer, disputer);
+        assert_eq!(ev_reason, str(&env, "oracle_error"));
     }
 
     // ── conflicting_oracle_report ─────────────────────────────────────────────
