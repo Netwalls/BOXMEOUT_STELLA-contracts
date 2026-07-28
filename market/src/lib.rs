@@ -589,8 +589,101 @@ impl MarketContract {
     /// - `admin` has not authorized the call or is not the configured admin.
     /// - The market status is not `Disputed`.
     pub fn resolve_dispute(env: Env, admin: Address, override_outcome: Outcome) {
-        let _ = (env, admin, override_outcome);
-        todo!("implement: require_auth(admin), validate status==Disputed, update outcome, set status=Resolved")
+        admin.require_auth();
+
+        let factory: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Factory)
+            .expect("factory not set");
+        let config: ProtocolConfig = env.invoke_contract(
+            &factory,
+            &Symbol::new(&env, "get_config"),
+            soroban_sdk::vec![&env],
+        );
+        if config.admin != admin {
+            panic!("not factory admin");
+        }
+
+        let mut market = Self::read_market(&env);
+        if market.status != MarketStatus::Disputed {
+            panic!("market not in disputed state");
+        }
+
+        market.outcome = Some(override_outcome.clone());
+        market.status = MarketStatus::Resolved;
+        Self::write_market(&env, &market);
+
+        env.events().publish(
+            (Symbol::new(&env, "DisputeResolved"),),
+            (market.market_id.clone(), override_outcome),
+        );
+    }
+
+    /// Finalizes the market resolution after dispute window expires or admin override.
+    ///
+    /// Supports two scenarios:
+    /// 1. Permissionless finalization when market is Resolved and dispute window has elapsed
+    /// 2. Admin-controlled finalization when market is Disputed (admin-only)
+    ///
+    /// After finalization, the `claim_winnings` function becomes available.
+    /// Emits a `ResolutionFinalized` event.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `admin` - (Optional) Address of the protocol admin. Required only when market is Disputed.
+    ///           If market is Resolved and window has elapsed, any caller can finalize.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - Market status is Resolved but dispute window has not elapsed yet.
+    /// - Market status is Disputed but caller is not the admin.
+    /// - Market is in any other status (Open, Locked, Cancelled).
+    pub fn finalize_resolution(env: Env, admin: Option<Address>) {
+        let mut market = Self::read_market(&env);
+
+        match market.status {
+            MarketStatus::Resolved => {
+                let current_time = env.ledger().timestamp();
+                let dispute_deadline = market.resolved_at + market.dispute_window_sec;
+                if current_time <= dispute_deadline {
+                    panic!("dispute window still open");
+                }
+                market.status = MarketStatus::Resolved;
+                Self::write_market(&env, &market);
+            }
+            MarketStatus::Disputed => {
+                if let Some(admin_addr) = admin {
+                    admin_addr.require_auth();
+                    let factory: Address = env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::Factory)
+                        .expect("factory not set");
+                    let config: ProtocolConfig = env.invoke_contract(
+                        &factory,
+                        &Symbol::new(&env, "get_config"),
+                        soroban_sdk::vec![&env],
+                    );
+                    if config.admin != admin_addr {
+                        panic!("not factory admin");
+                    }
+                } else {
+                    panic!("admin required for disputed market");
+                }
+
+                market.status = MarketStatus::Resolved;
+                Self::write_market(&env, &market);
+            }
+            _ => panic!("market cannot be finalized in current state"),
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "ResolutionFinalized"),),
+            (market.market_id.clone(), env.ledger().timestamp()),
+        );
     }
 
     /// Returns the full [`Market`] struct for this contract.
@@ -609,10 +702,7 @@ impl MarketContract {
     ///
     /// Panics if the market has not been initialized.
     pub fn get_market_info(env: Env) -> Market {
-        env.storage().persistent()
-            .get(&DataKey::MarketInfo)
-        env.storage().persistent().get(&DataKey::MarketInfo)
-            .expect("market not initialized")
+        Self::read_market(&env)
     }
 
     /// Returns the [`Bet`] identified by `bet_id`.
@@ -632,43 +722,6 @@ impl MarketContract {
     ///
     /// Panics if `bet_id` does not correspond to any recorded bet.
     pub fn get_bet(env: Env, bet_id: Bytes) -> Bet {
-        env.storage().persistent()
-        todo!("implement: require_auth(bettor), verify bettor has a bet, check within window, check no existing dispute, set status=Disputed, store reason")
-    }
-
-    /// Admin-only. Settles a disputed market with a final override outcome.
-    /// require_auth() is the first call.
-    pub fn resolve_dispute(env: Env, admin: Address, override_outcome: Outcome) {
-        admin.require_auth();
-
-        let mut market = Self::read_market(&env);
-        if market.status != MarketStatus::Disputed {
-            panic!("market not in disputed state");
-        }
-
-        market.outcome = match override_outcome {
-            Outcome::FighterA => SettledOutcome::FighterA,
-            Outcome::FighterB => SettledOutcome::FighterB,
-            Outcome::Draw => SettledOutcome::Draw,
-            Outcome::NoContest => SettledOutcome::NoContest,
-        };
-        market.status = MarketStatus::Resolved;
-        Self::write_market(&env, &market);
-
-        env.events().publish(
-            (Symbol::new(&env, "DisputeResolved"),),
-            market.market_id.clone(),
-        );
-    }
-
-    pub fn get_market_info(env: Env) -> Market {
-        Self::read_market(&env)
-    }
-
-    pub fn get_bet(env: Env, bet_id: Bytes) -> Bet {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Bet(bet_id))
         env.storage().persistent().get(&DataKey::Bet(bet_id))
             .expect("bet not found")
     }
@@ -697,16 +750,6 @@ impl MarketContract {
             }
         }
         bets
-        let _ = (env, bettor);
-        todo!("implement: read BetsByAddr for bet_ids, map to Bet structs, return vec")
-        let mut bets: Vec<Bet> = Vec::new(&env);
-        for bet_id in bet_ids.iter() {
-            let bet: Bet = env.storage().persistent()
-                .get(&DataKey::Bet(bet_id))
-                .expect("bet not found for bet_id in index");
-            bets.push_back(bet);
-        }
-        bets
     }
 
     /// Estimates the payout for a bet based on current pool sizes.
@@ -727,8 +770,46 @@ impl MarketContract {
     ///
     /// Panics if `bet_id` does not correspond to any recorded bet.
     pub fn calculate_payout(env: Env, bet_id: Bytes) -> i128 {
-        let _ = (env, bet_id);
-        todo!("implement: read bet + market pools, apply payout formula, return estimate")
+        let bet: Bet = env.storage().persistent()
+            .get(&DataKey::Bet(bet_id))
+            .expect("bet not found");
+
+        let market: Market = env.storage().persistent()
+            .get(&DataKey::MarketInfo)
+            .expect("market not initialized");
+
+        let outcome = match market.outcome.clone() {
+            Some(o) => o,
+            None => return 0,
+        };
+
+        let is_winner = match (&bet.side, &outcome) {
+            (BetSide::FighterA, Outcome::FighterA) => true,
+            (BetSide::FighterB, Outcome::FighterB) => true,
+            _ => false,
+        };
+
+        if !is_winner {
+            return 0;
+        }
+
+        let winning_pool = match outcome {
+            Outcome::FighterA => market.pool_a,
+            Outcome::FighterB => market.pool_b,
+            _ => market.pool_a.checked_add(market.pool_b).expect("pool sum overflow"),
+        };
+
+        if winning_pool == 0 {
+            return 0;
+        }
+
+        let fee_amount = shared::types::calculate_fee(market.total_pool, market.protocol_fee_bp);
+        let net_pool = market.total_pool.checked_sub(fee_amount).expect("net pool underflow");
+        bet.amount
+            .checked_mul(net_pool)
+            .expect("payout overflow")
+            .checked_div(winning_pool)
+            .expect("payout div zero")
     }
 
     /// Returns current pool sizes and implied odds for both fighters.
