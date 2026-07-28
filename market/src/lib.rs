@@ -113,7 +113,7 @@ impl MarketContract {
             panic!("already initialized");
         }
         let market = Market {
-            market_id,
+            market_id: market_id.clone(),
             fighter_a,
             fighter_b,
             scheduled_at,
@@ -126,14 +126,21 @@ impl MarketContract {
             total_pool: 0,
             protocol_fee_bp,
             oracle_address: oracle,
-            outcome: SettledOutcome::Pending,
-            fee_collector_address: fee_collector,
             outcome: None,
+            fee_collector_address: fee_collector.clone(),
             resolved_at: 0,
             dispute_window_sec,
         };
         env.storage().persistent().set(&DataKey::MarketInfo, &market);
         env.storage().persistent().set(&DataKey::Factory, &factory);
+
+        // Emit market_created event with contract address and market info
+        // Topics: (Symbol("market_created"), market_id)
+        // Data: Market struct (matches MarketInfo field-for-field)
+        env.events().publish(
+            (Symbol::new(&env, "market_created"), market_id),
+            market,
+        );
     }
 
     /// Accepts a bet from bettor and records it in escrow.
