@@ -81,8 +81,11 @@ impl MarketFactory {
     }
 
     /// Updates the Market wasm hash used for new deployments.
-    /// Only admin can call this.
-    pub fn update_market_wasm(
+    ///
+    /// Only the protocol admin can call this. Only affects markets deployed
+    /// after this call — already-deployed Market instances keep running the
+    /// wasm code they were originally deployed with.
+    pub fn upgrade_market_wasm(
         env: Env,
         admin: Address,
         new_wasm_hash: BytesN<32>,
