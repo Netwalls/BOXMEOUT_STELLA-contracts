@@ -504,11 +504,11 @@ impl MarketContract {
     }
 
 
-    /// Raises a dispute against the market resolution.
+    /// Dispute resolution - allows bettors to challenge submitted market resolutions.
     ///
     /// Transitions status to `Disputed`, freezing all claim processing until an admin
     /// settles the dispute. Must be called within `dispute_window_sec` of `resolved_at`.
-    /// Only one active dispute is allowed per market. Emits a `DisputeRaised` event.
+    /// Only one active dispute is allowed per market. Emits a `resolution_disputed` event.
     ///
     /// # Arguments
     ///
@@ -525,7 +525,7 @@ impl MarketContract {
     /// - The dispute window has elapsed since resolution.
     /// - A dispute is already active on this market.
     /// - The market status is not `Resolved`.
-    pub fn raise_dispute(env: Env, bettor: Address, reason: Bytes) {
+    pub fn dispute_resolution(env: Env, bettor: Address, reason: Bytes) {
         bettor.require_auth();
 
         let mut market = Self::read_market(&env);
@@ -566,7 +566,7 @@ impl MarketContract {
         env.storage().persistent().set(&DataKey::DisputeReason, &reason);
 
         env.events().publish(
-            (Symbol::new(&env, "DisputeRaised"),),
+            (Symbol::new(&env, "resolution_disputed"),),
             (market.market_id.clone(), bettor.clone(), reason),
         );
     }
