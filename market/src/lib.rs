@@ -1,29 +1,11 @@
 #![no_std]
-use shared::types::{Bet, BetSide, Fighter, Market, MarketStatus, Outcome, ProtocolConfig};
-use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String, Symbol, Vec,
-};
-use crate::types::{Bet, BetSide, ClaimReceipt, Fighter, Market, MarketResolved, MarketStatus, Outcome, ProtocolConfig, WinningsClaimed};
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Bytes, Env, String, Symbol, Vec};
-
-const MARKET_INFO_KEY: &str = "market_info";
-const NEXT_BET_ID_KEY: &str = "next_bet_id";
-
-// ─── STORAGE KEYS ─────────────────────────────────────────────────────────────
-// MarketInfo           -> Market
-// Factory              -> Address
-// Bet(bet_id)          -> Bet
-// BetsByAddr(addr)     -> Vec<Bytes>
-// Claimed(bet_id)      -> bool
-// DisputeRaised        -> bool
-// DisputeReason        -> Bytes
 
 pub mod types;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Bytes, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String, Symbol, Vec,
 };
-use types::{Bet, BetSide, Fighter, Market, MarketStatus, Outcome, ProtocolConfig};
+use types::{Bet, BetSide, ClaimReceipt, Fighter, Market, MarketResolved, MarketStatus, Outcome, ProtocolConfig, WinningsClaimed};
 
 // ─── STORAGE KEYS ─────────────────────────────────────────────────────────────
 // DataKey::MarketInfo     -> Market
@@ -126,9 +108,8 @@ impl MarketContract {
             total_pool: 0,
             protocol_fee_bp,
             oracle_address: oracle,
-            outcome: SettledOutcome::Pending,
-            fee_collector_address: fee_collector,
             outcome: None,
+            fee_collector_address: fee_collector,
             resolved_at: 0,
             dispute_window_sec,
         };
@@ -136,18 +117,6 @@ impl MarketContract {
         env.storage().persistent().set(&DataKey::Factory, &factory);
     }
 
-    /// Accepts a bet from bettor and records it in escrow.
-    /// Transfers XLM from bettor to this contract.
-    pub fn place_bet(env: Env, bettor: Address, side: BetSide, amount: i128) -> Bytes {
-        bettor.require_auth();
-
-        let mut market: Market = env.storage().persistent()
-            .get(&DataKey::MarketInfo)
-            .expect("market not initialized");
-    /// Accepts a bet from bettor and records it.
-    /// Panics if market is not Open, or if current time > betting_ends_at.
-    /// A bet placed exactly at betting_ends_at is still valid.
-    pub fn place_bet(env: Env, bettor: Address, side: BetSide, amount: i128) -> Bytes {
     /// Places a bet on a fighter in this market.
     ///
     /// Transfers XLM from `bettor` to this contract (escrow), records the bet,
@@ -204,11 +173,6 @@ impl MarketContract {
             panic!("above maximum bet");
         }
 
-        // Reject bets after betting_ends_at; bets at exactly betting_ends_at are valid.
-        if env.ledger().timestamp() > market.betting_ends_at {
-            panic!("betting period has ended");
-        }
-
         if amount <= 0 {
             panic!("amount must be positive");
         }
@@ -220,16 +184,6 @@ impl MarketContract {
         market.total_pool = market.total_pool.checked_add(amount).expect("total_pool overflow");
 
         let bet_count: u64 = env.storage().persistent()
-            .get(&Symbol::new(&env, "BET_CNT"))
-            .unwrap_or(0u64);
-        let new_count = bet_count + 1;
-        env.storage().persistent().set(&Symbol::new(&env, "BET_CNT"), &new_count);
-        let mut id_bytes = [0u8; 32];
-        id_bytes[..8].copy_from_slice(&new_count.to_be_bytes());
-        let bet_id = Bytes::from_array(&env, &id_bytes);
-        let bet_count: u64 = env
-            .storage()
-            .persistent()
             .get(&Symbol::new(&env, "BET_COUNT"))
             .unwrap_or(0u64);
         let new_count = bet_count + 1;
@@ -250,19 +204,6 @@ impl MarketContract {
             claimed: false,
         };
         env.storage().persistent().set(&DataKey::Bet(bet_id.clone()), &bet);
-        env.storage().persistent().set(&DataKey::MarketInfo, &market);
-
-        let mut addr_bets: Vec<Bytes> = env.storage().persistent()
-            .get(&DataKey::BetsByAddr(bettor.clone()))
-            .unwrap_or(Vec::new(&env));
-        addr_bets.push_back(bet_id.clone());
-        env.storage().persistent().set(&DataKey::BetsByAddr(bettor.clone()), &addr_bets);
-
-        env.events().publish(
-            (symbol_short!("bet_placed"),),
-        env.storage()
-            .persistent()
-            .set(&DataKey::Bet(bet_id.clone()), &bet);
 
         let mut bets: Vec<Bytes> = env
             .storage()
