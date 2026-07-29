@@ -51,10 +51,21 @@ impl MarketFactory {
         Ok(())
     }
 
-    /// Returns the stored admin address.
-    pub fn get_admin(env: Env) -> Address {
-        env.storage().persistent().get(&ADMIN).expect("not initialized")
-    }
+    /// Updates the Market wasm hash used for new deployments.
+    ///
+    /// Only the protocol admin can call this. Only affects markets deployed
+    /// after this call — already-deployed Market instances keep running the
+    /// wasm code they were originally deployed with.
+    pub fn upgrade_market_wasm(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) {
+        admin.require_auth();
+
+        let config: ProtocolConfig = env.storage().persistent()
+            .get(&CONFIG_KEY)
+            .expect("not initialized");
 
     /// Returns the stored Market contract wasm hash.
     pub fn get_market_wasm_hash(env: Env) -> BytesN<32> {

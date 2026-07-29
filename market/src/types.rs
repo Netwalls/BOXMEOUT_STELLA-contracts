@@ -66,6 +66,8 @@ pub struct Market {
     pub fee_collector_address: Address,
     pub resolved_at: u64,
     pub dispute_window_sec: u64,
+    pub treasury: Address,
+    pub bet_token: Address,
 }
 
 #[contracttype]
