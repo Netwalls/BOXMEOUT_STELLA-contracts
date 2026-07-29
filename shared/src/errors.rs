@@ -26,6 +26,8 @@ pub enum ContractError {
     BettingClosed = 12,
     /// Market has already been initialized
     AlreadyInitialized = 13,
+    /// end_time is in the past, or lock_time is after end_time
+    InvalidTimestamp = 14,
 
     // ── Bet Validation ─────────────────────────────────────
     /// Bet amount is below config.min_bet
