@@ -3,7 +3,8 @@
 pub mod types;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, IntoVal, String,
+    Symbol, Vec,
 };
 use types::{Bet, BetSide, ClaimReceipt, Fighter, Market, MarketResolved, MarketStatus, Outcome, ProtocolConfig, WinningsClaimed};
 
@@ -63,10 +64,14 @@ impl MarketContract {
     /// * `protocol_fee_bp` - Protocol fee in basis points (e.g. `200` = 2%).
     /// * `fee_collector` - Address that receives the protocol fee on payouts.
     /// * `dispute_window_sec` - Duration in seconds during which disputes can be raised after resolution.
+    /// * `treasury` - Address of the `Treasury` contract used to escrow bet funds.
+    /// * `bet_token` - Address of the token contract accepted for bets on this market.
     ///
     /// # Panics
     ///
-    /// Panics if the market has already been initialized.
+    /// Panics if:
+    /// - The market has already been initialized.
+    /// - `betting_ends_at` (lock time) is after `scheduled_at` (end time).
     pub fn initialize(
         env: Env,
         market_id: Bytes,
@@ -79,9 +84,14 @@ impl MarketContract {
         protocol_fee_bp: u32,
         fee_collector: Address,
         dispute_window_sec: u64,
+        treasury: Address,
+        bet_token: Address,
     ) {
         if env.storage().persistent().has(&DataKey::MarketInfo) {
             panic!("already initialized");
+        }
+        if betting_ends_at > scheduled_at {
+            panic!("lock time must be at or before end time");
         }
         let market = Market {
             market_id: market_id.clone(),
@@ -101,6 +111,8 @@ impl MarketContract {
             fee_collector_address: fee_collector,
             resolved_at: 0,
             dispute_window_sec,
+            treasury,
+            bet_token,
         };
         env.storage().persistent().set(&DataKey::MarketInfo, &market);
         env.storage().persistent().set(&DataKey::Factory, &factory);
@@ -173,6 +185,21 @@ impl MarketContract {
         if amount <= 0 {
             panic!("amount must be positive");
         }
+
+        // Escrow the bet amount via the Treasury. This is a cross-contract call
+        // that aborts the whole transaction on failure, so the bet is only ever
+        // recorded below once the deposit has actually succeeded.
+        env.invoke_contract::<()>(
+            &market.treasury,
+            &Symbol::new(&env, "deposit"),
+            soroban_sdk::vec![
+                &env,
+                env.current_contract_address().into_val(&env),
+                market.market_id.clone().into_val(&env),
+                bettor.clone().into_val(&env),
+                amount.into_val(&env),
+            ],
+        );
 
         match side {
             BetSide::FighterA => market.pool_a = market.pool_a.checked_add(amount).expect("pool_a overflow"),
@@ -281,8 +308,29 @@ impl MarketContract {
     /// Panics if the market status is not `Open`, or if `oracle` is not the
     /// authorized oracle address and the betting period has not yet ended.
     pub fn lock_market(env: Env, oracle: Address) {
-        let _ = (env, oracle);
-        todo!("implement: verify caller==oracle OR ledger time > betting_ends_at, set status=Locked, emit event")
+        let mut market = Self::read_market(&env);
+
+        if market.status != MarketStatus::Open {
+            panic!("market already locked");
+        }
+
+        let now = env.ledger().timestamp();
+        if now < market.betting_ends_at {
+            // Early lock: only the market's oracle may lock before lock_time passes.
+            oracle.require_auth();
+            if oracle != market.oracle_address {
+                panic!("not authorized oracle");
+            }
+        }
+        // Once lock_time has passed, locking is permissionless — no auth required.
+
+        market.status = MarketStatus::Locked;
+        Self::write_market(&env, &market);
+
+        env.events().publish(
+            (Symbol::new(&env, "MarketLocked"),),
+            (market.market_id.clone(), now),
+        );
     }
 
     /// Called by oracle after fight concludes.

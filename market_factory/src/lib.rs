@@ -1,88 +1,66 @@
 #![no_std]
 //! ============================================================
 //! BOXMEOUT — MarketFactory Contract
+//! Deploys and tracks Market contract instances.
 //! ============================================================
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Map, String, Vec, BytesN};
+use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, Map, String, Vec};
 
-use boxmeout_shared::{
-    errors::ContractError,
-    types::{FightDetails, MarketConfig},
-};
+use shared::{errors::ContractError, types::MarketInfo};
 
 // Storage keys for persistent state
 const ADMIN: &str = "ADMIN";
-const PENDING_ADMIN: &str = "PENDING_ADMIN";
+const MARKET_WASM_HASH: &str = "MARKET_WASM_HASH";
+const TREASURY: &str = "TREASURY";
 const PAUSED: &str = "PAUSED";
-const CONFIG_KEY: &str = "CONFIG";
 const MARKET_COUNT_KEY: &str = "MARKET_COUNT";
 const MARKET_MAP: &str = "MARKET_MAP";
 const ALL_MARKETS_KEY: &str = "ALL_MARKETS";
-const MARKET_WASM_HASH: &str = "MARKET_WASM_HASH";
-const ORACLE_WHITELIST: &str = "ORACLE_WHITELIST";
 
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct ProtocolConfig {
-    pub admin: Address,
-    pub fee_collector: Address,
-    pub default_fee_bp: u32,
-    pub min_bet_amount: i128,
-    pub max_bet_amount: i128,
-    pub dispute_window_sec: u64,
-    pub paused: bool,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct MarketCreatedEvent {
-    pub market_id: Bytes,
-    pub fighter_a_name: String,
-    pub fighter_b_name: String,
-    pub scheduled_at: u64,
-    pub oracle: Address,
-    pub created_by: Address,
-}
+/// Maximum number of markets that may be returned in a single `list_markets` /
+/// `list_active_markets` page, regardless of the caller-requested `limit`.
+const MAX_PAGE_SIZE: u32 = 50;
 
 #[contract]
 pub struct MarketFactory;
 
 #[contractimpl]
 impl MarketFactory {
-    /// Initializes the factory with protocol-wide configuration.
-    /// Must be called once immediately after deployment.
+    /// One-time setup. Stores the admin, the Market contract's wasm hash
+    /// (used for all future deployments), and the treasury address.
+    ///
+    /// # Errors
+    /// Returns `ContractError::AlreadyInitialized` if called more than once.
     pub fn initialize(
         env: Env,
         admin: Address,
-        fee_collector: Address,
-        default_fee_bp: u32,
-        min_bet: i128,
-        max_bet: i128,
-    ) {
-        if env.storage().persistent().has(&CONFIG_KEY) {
-            panic!("already initialized");
+        market_wasm_hash: BytesN<32>,
+        treasury: Address,
+    ) -> Result<(), ContractError> {
+        if env.storage().persistent().has(&ADMIN) {
+            return Err(ContractError::AlreadyInitialized);
         }
 
-        let config = ProtocolConfig {
-            admin,
-            fee_collector,
-            default_fee_bp,
-            min_bet_amount: min_bet,
-            max_bet_amount: max_bet,
-            dispute_window_sec: 86_400,
-            paused: false,
-        };
-
-        env.storage().persistent().set(&CONFIG_KEY, &config);
-        env.storage().persistent().set(&MARKET_COUNT_KEY, &0u64);
-        env.storage().persistent().set(&ALL_MARKETS_KEY, &Vec::<Bytes>::new(&env));
-        env.storage().persistent().set(&MARKET_MAP, &Map::<Bytes, Address>::new(&env));
-        env.storage().persistent().set(&ORACLE_WHITELIST, &Vec::<Address>::new(&env));
+        env.storage().persistent().set(&ADMIN, &admin);
+        env.storage().persistent().set(&MARKET_WASM_HASH, &market_wasm_hash);
+        env.storage().persistent().set(&TREASURY, &treasury);
         env.storage().persistent().set(&PAUSED, &false);
+        env.storage().persistent().set(&MARKET_COUNT_KEY, &0u64);
+        env.storage()
+            .persistent()
+            .set(&ALL_MARKETS_KEY, &Vec::<Bytes>::new(&env));
+        env.storage()
+            .persistent()
+            .set(&MARKET_MAP, &Map::<Bytes, MarketInfo>::new(&env));
+
+        Ok(())
     }
 
     /// Updates the Market wasm hash used for new deployments.
-    /// Only admin can call this.
-    pub fn update_market_wasm(
+    ///
+    /// Only the protocol admin can call this. Only affects markets deployed
+    /// after this call — already-deployed Market instances keep running the
+    /// wasm code they were originally deployed with.
+    pub fn upgrade_market_wasm(
         env: Env,
         admin: Address,
         new_wasm_hash: BytesN<32>,
@@ -93,410 +71,543 @@ impl MarketFactory {
             .get(&CONFIG_KEY)
             .expect("not initialized");
 
-        if config.admin != admin {
-            panic!("unauthorized");
-        }
-
-        env.storage().persistent().set(&MARKET_WASM_HASH, &new_wasm_hash);
+    /// Returns the stored Market contract wasm hash.
+    pub fn get_market_wasm_hash(env: Env) -> BytesN<32> {
+        env.storage()
+            .persistent()
+            .get(&MARKET_WASM_HASH)
+            .expect("not initialized")
     }
 
-    /// Creates a new market for a boxing match.
-    /// Validates inputs, generates unique market_id, deploys Market contract.
+    /// Returns the stored treasury address.
+    pub fn get_treasury(env: Env) -> Address {
+        env.storage().persistent().get(&TREASURY).expect("not initialized")
+    }
+
+    /// Deploys a new Market contract instance and registers its `MarketInfo`.
     ///
-    /// # Arguments
-    /// * `caller` - Address creating the market, must authorize this call
-    /// * `fighter_a` - Name of the first fighter (non-empty)
-    /// * `fighter_b` - Name of the second fighter (non-empty)
-    /// * `scheduled_at` - Unix timestamp of the scheduled fight (must be in future)
-    /// * `betting_ends_at` - Unix timestamp when betting closes (must be before scheduled_at)
-    /// * `oracle` - Address authorized to lock and resolve this market
-    ///
-    /// # Returns
-    /// Returns the unique `market_id` (Bytes) for the newly created market
-    ///
-    /// # Panics
-    /// - Protocol is paused
-    /// - betting_ends_at >= scheduled_at
-    /// - Either fighter name is empty
-    /// - scheduled_at is not in the future
+    /// # Errors
+    /// - `ContractError::FactoryPaused` if the factory is paused
+    /// - `ContractError::InvalidTimestamp` if `end_time` is in the past, or
+    ///   `lock_time` is after `end_time`
     pub fn create_market(
         env: Env,
         caller: Address,
         fighter_a: String,
         fighter_b: String,
-        scheduled_at: u64,
-        betting_ends_at: u64,
         oracle: Address,
-    ) -> Bytes {
+        lock_time: u64,
+        end_time: u64,
+    ) -> Result<Bytes, ContractError> {
         caller.require_auth();
 
-        // Get protocol config and validate not paused
-        let protocol_config: ProtocolConfig = env.storage().persistent()
-            .get(&CONFIG_KEY)
-            .expect("not initialized");
-
-        if protocol_config.paused {
-            panic!("protocol is paused");
+        let paused: bool = env.storage().persistent().get(&PAUSED).unwrap_or(false);
+        if paused {
+            return Err(ContractError::FactoryPaused);
         }
 
-        // Validate all inputs
-        if protocol_config.paused {
-            panic!("protocol is paused");
-        }
-        if betting_ends_at >= scheduled_at {
-            panic!("betting_ends_at must be before scheduled_at");
-        }
-        if fighter_a.is_empty() || fighter_b.is_empty() {
-            panic!("fighter names cannot be empty");
-        }
-        if scheduled_at <= env.ledger().timestamp() {
-            panic!("scheduled_at must be in the future");
+        let now = env.ledger().timestamp();
+        if end_time <= now || lock_time > end_time {
+            return Err(ContractError::InvalidTimestamp);
         }
 
-        // Generate unique market_id from fighter names, scheduled_at, and nonce
-        let count: u64 = env.storage().persistent()
-            .get(&MARKET_COUNT_KEY)
-            .unwrap_or(0);
+        let count: u64 = env.storage().persistent().get(&MARKET_COUNT_KEY).unwrap_or(0);
 
+        // Generate a collision-resistant market_id from the creation nonce,
+        // both fighter names, and the scheduled end_time.
         let mut id_bytes = [0u8; 32];
-        let count_bytes = count.to_le_bytes();
-        id_bytes[0..8].copy_from_slice(&count_bytes);
-
-        // Mix in fighter names and scheduled timestamp for uniqueness
-        let fight_a_bytes = fighter_a.as_bytes();
-        let fight_b_bytes = fighter_b.as_bytes();
-        for (i, byte) in fight_a_bytes.iter().take(8).enumerate() {
+        id_bytes[0..8].copy_from_slice(&count.to_le_bytes());
+        for (i, byte) in fighter_a.to_bytes().iter().take(8).enumerate() {
             id_bytes[8 + i] ^= byte;
         }
-        for (i, byte) in fight_b_bytes.iter().take(8).enumerate() {
+        for (i, byte) in fighter_b.to_bytes().iter().take(8).enumerate() {
             id_bytes[16 + i] ^= byte;
         }
-
-        let scheduled_bytes = scheduled_at.to_le_bytes();
-        id_bytes[24..32].copy_from_slice(&scheduled_bytes);
-
+        id_bytes[24..32].copy_from_slice(&end_time.to_le_bytes());
         let market_id = Bytes::from_array(&env, &id_bytes);
 
-        // Deploy Market contract
-        let wasm_hash: BytesN<32> = env.storage().persistent()
+        let wasm_hash: BytesN<32> = env
+            .storage()
+            .persistent()
             .get(&MARKET_WASM_HASH)
-            .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]));
+            .expect("not initialized");
 
         let salt = BytesN::from_array(&env, &id_bytes);
         let market_address = env
             .deployer()
             .with_address(env.current_contract_address(), salt)
-            .deploy(wasm_hash);
+            .deploy_v2(wasm_hash, ());
 
-        // Store market address
-        let mut market_map: Map<Bytes, Address> = env.storage().persistent()
+        let info = MarketInfo {
+            market_id: market_id.clone(),
+            market_address,
+            creator: caller,
+            fighter_a: fighter_a.clone(),
+            fighter_b: fighter_b.clone(),
+            oracle: oracle.clone(),
+            lock_time,
+            end_time,
+            created_at: now,
+        };
+
+        let mut market_map: Map<Bytes, MarketInfo> = env
+            .storage()
+            .persistent()
             .get(&MARKET_MAP)
             .unwrap_or_else(|| Map::new(&env));
-        market_map.set(market_id.clone(), market_address.clone());
+        market_map.set(market_id.clone(), info.clone());
         env.storage().persistent().set(&MARKET_MAP, &market_map);
 
-        // Increment market count
-        let new_count = count.checked_add(1).expect("market count overflow");
-        env.storage().persistent().set(&MARKET_COUNT_KEY, &new_count);
-
-        // Append to ALL_MARKETS
-        let mut all_markets: Vec<Bytes> = env.storage().persistent()
+        let mut all_markets: Vec<Bytes> = env
+            .storage()
+            .persistent()
             .get(&ALL_MARKETS_KEY)
             .unwrap_or_else(|| Vec::new(&env));
         all_markets.push_back(market_id.clone());
         env.storage().persistent().set(&ALL_MARKETS_KEY, &all_markets);
 
-        // Emit MarketCreated event
-        let event = MarketCreatedEvent {
-            market_id: market_id.clone(),
-            fighter_a_name: fighter_a,
-            fighter_b_name: fighter_b,
-            scheduled_at,
-            oracle,
-            created_by: caller,
-        };
-        env.events().publish(("market_created",), event);
+        env.storage()
+            .persistent()
+            .set(&MARKET_COUNT_KEY, &(count + 1));
 
-        market_id
+        env.events().publish(("market_created",), info);
+
+        Ok(market_id)
     }
 
-    /// Retrieves the address of a market by ID.
-    pub fn get_market_address(env: Env, market_id: Bytes) -> Address {
-        let map: Map<Bytes, Address> = env.storage().persistent()
+    /// Read-only lookup of a single market by ID. Does not mutate state.
+    pub fn get_market(env: Env, market_id: Bytes) -> Option<MarketInfo> {
+        let map: Map<Bytes, MarketInfo> = env
+            .storage()
+            .persistent()
             .get(&MARKET_MAP)
             .unwrap_or_else(|| Map::new(&env));
-
-        map.get(market_id).expect("market not found")
-    ///
-    /// # Panics
-    /// - Panics with "market not found" if market_id does not exist
-    pub fn get_market_address(env: Env, market_id: u64) -> Address {
-        let map: Map<u64, Address> =
-            env.storage().persistent().get(&MARKET_MAP).unwrap_or_else(|| Map::new(&env));
-        map.get(market_id).unwrap_or_else(|| panic!("market {} not found", market_id))
+        map.get(market_id)
     }
 
-    /// Returns whether a market with the given ID exists.
-    pub fn market_exists(env: Env, market_id: u64) -> bool {
-        let map: Map<u64, Address> =
-            env.storage().persistent().get(&MARKET_MAP).unwrap_or_else(|| Map::new(&env));
-        map.get(market_id).is_some()
-    }
-
-    /// Returns all market IDs ever created.
-    pub fn get_all_markets(env: Env) -> Vec<Bytes> {
-        env.storage().persistent()
-            .get(&ALL_MARKETS_KEY)
-            .unwrap_or_else(|| Vec::new(&env))
-    }
-
-    /// Returns a paginated slice of market IDs.
-    pub fn get_markets_paginated(env: Env, offset: u32, limit: u32) -> Vec<Bytes> {
-        let all: Vec<Bytes> = env.storage().persistent()
+    /// Returns a bounded, stably-ordered (creation order) page of all markets
+    /// ever created. `limit` is capped at `MAX_PAGE_SIZE` regardless of the
+    /// value requested, to bound gas.
+    pub fn list_markets(env: Env, offset: u32, limit: u32) -> Vec<MarketInfo> {
+        let all_ids: Vec<Bytes> = env
+            .storage()
+            .persistent()
             .get(&ALL_MARKETS_KEY)
             .unwrap_or_else(|| Vec::new(&env));
 
-        let total = all.len();
+        let total = all_ids.len();
         if offset >= total {
             return Vec::new(&env);
         }
 
-        let cap = if limit > 100 { 100 } else { limit };
-        let mut result: Vec<Bytes> = Vec::new(&env);
-        let end = (offset + cap).min(total);
+        let map: Map<Bytes, MarketInfo> = env
+            .storage()
+            .persistent()
+            .get(&MARKET_MAP)
+            .unwrap_or_else(|| Map::new(&env));
 
+        let capped_limit = if limit > MAX_PAGE_SIZE { MAX_PAGE_SIZE } else { limit };
+        let end = (offset + capped_limit).min(total);
+
+        let mut result: Vec<MarketInfo> = Vec::new(&env);
         for i in offset..end {
-            result.push_back(all.get(i).unwrap());
+            let id = all_ids.get(i).unwrap();
+            result.push_back(map.get(id).unwrap());
         }
         result
     }
 
-    /// Returns the total number of markets created.
-    pub fn get_market_count(env: Env) -> u64 {
-        env.storage().persistent()
-            .get(&MARKET_COUNT_KEY)
-            .unwrap_or(0)
-    }
-
-    /// Returns the current protocol configuration.
-    pub fn get_config(env: Env) -> ProtocolConfig {
-        env.storage().persistent()
-            .get(&CONFIG_KEY)
-            .expect("not initialized")
-    }
-
-    /// Updates the global protocol configuration.
-    pub fn update_config(env: Env, admin: Address, new_config: ProtocolConfig) {
-        admin.require_auth();
-
-        let config: ProtocolConfig = env.storage().persistent()
-            .get(&CONFIG_KEY)
-            .expect("not initialized");
-
-        if config.admin != admin {
-            panic!("unauthorized");
-        }
-
-        env.storage().persistent().set(&CONFIG_KEY, &new_config);
-    }
-
-    /// Pauses the protocol, preventing new market creation.
-    pub fn pause_protocol(env: Env, admin: Address) {
-        admin.require_auth();
-
-        let config: ProtocolConfig = env.storage().persistent()
-            .get(&CONFIG_KEY)
-            .expect("not initialized");
-
-        if config.admin != admin {
-            panic!("unauthorized");
-        }
-
-        let mut new_config = config;
-        new_config.paused = true;
-        env.storage().persistent().set(&CONFIG_KEY, &new_config);
-    }
-
-    /// Unpauses the protocol.
-    pub fn unpause_protocol(env: Env, admin: Address) {
-        admin.require_auth();
-
-        let config: ProtocolConfig = env.storage().persistent()
-            .get(&CONFIG_KEY)
-            .expect("not initialized");
-
-        if config.admin != admin {
-            panic!("unauthorized");
-        }
-
-        let mut new_config = config;
-        new_config.paused = false;
-        env.storage().persistent().set(&CONFIG_KEY, &new_config);
-    }
-
-    /// Returns whether the protocol is paused.
-    pub fn is_paused(env: Env) -> bool {
-        let config: ProtocolConfig = env.storage().persistent()
-            .get(&CONFIG_KEY)
-            .expect("not initialized");
-        config.paused
-    }
-
-    /// Initiates a two-step admin transfer.
-    pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
-        admin.require_auth();
-
-        let config: ProtocolConfig = env.storage().persistent()
-            .get(&CONFIG_KEY)
-            .expect("not initialized");
-
-        if config.admin != admin {
-            panic!("unauthorized");
-        }
-
-        env.storage().persistent().set(&PENDING_ADMIN, &new_admin);
-    }
-
-    /// Completes the two-step admin transfer.
-    pub fn accept_admin(env: Env, new_admin: Address) {
-        new_admin.require_auth();
-
-        let pending: Address = env.storage().persistent()
-            .get(&PENDING_ADMIN)
-            .expect("no pending admin transfer");
-
-        if pending != new_admin {
-            panic!("not the pending admin");
-        }
-
-        let mut config: ProtocolConfig = env.storage().persistent()
-            .get(&CONFIG_KEY)
-            .expect("not initialized");
-
-        config.admin = new_admin;
-        env.storage().persistent().set(&CONFIG_KEY, &config);
-        env.storage().persistent().remove(&PENDING_ADMIN);
-    }
-
-    /// Adds an oracle to the whitelist.
-    pub fn add_oracle(env: Env, admin: Address, oracle: Address) {
-        admin.require_auth();
-
-        let config: ProtocolConfig = env.storage().persistent()
-            .get(&CONFIG_KEY)
-            .expect("not initialized");
-
-        if config.admin != admin {
-            panic!("unauthorized");
-        }
-
-        let mut oracles: Vec<Address> = env.storage().persistent()
-            .get(&ORACLE_WHITELIST)
+    /// Returns every market whose `end_time` has not yet passed, in creation order.
+    pub fn list_active_markets(env: Env) -> Vec<MarketInfo> {
+        let all_ids: Vec<Bytes> = env
+            .storage()
+            .persistent()
+            .get(&ALL_MARKETS_KEY)
             .unwrap_or_else(|| Vec::new(&env));
 
-        if !oracles.contains(oracle.clone()) {
-            oracles.push_back(oracle);
-        }
+        let map: Map<Bytes, MarketInfo> = env
+            .storage()
+            .persistent()
+            .get(&MARKET_MAP)
+            .unwrap_or_else(|| Map::new(&env));
 
-        env.storage().persistent().set(&ORACLE_WHITELIST, &oracles);
-    }
-
-    /// Removes an oracle from the whitelist.
-    pub fn remove_oracle(env: Env, admin: Address, oracle: Address) {
-        admin.require_auth();
-
-        let config: ProtocolConfig = env.storage().persistent()
-            .get(&CONFIG_KEY)
-            .expect("not initialized");
-
-        if config.admin != admin {
-            panic!("unauthorized");
-        }
-
-        let oracles: Vec<Address> = env.storage().persistent()
-            .get(&ORACLE_WHITELIST)
-            .unwrap_or_else(|| Vec::new(&env));
-
-        let mut updated: Vec<Address> = Vec::new(&env);
-        let mut found = false;
-
-        for o in oracles.iter() {
-            if o == oracle {
-                found = true;
-            } else {
-                updated.push_back(o);
+        let now = env.ledger().timestamp();
+        let mut result: Vec<MarketInfo> = Vec::new(&env);
+        for id in all_ids.iter() {
+            let info = map.get(id).unwrap();
+            if info.end_time > now {
+                result.push_back(info);
             }
         }
-
-        if !found {
-            panic!("oracle not whitelisted");
-        }
-
-        env.storage().persistent().set(&ORACLE_WHITELIST, &updated);
+        result
     }
 
-    /// Returns the list of whitelisted oracles.
-    pub fn get_oracles(env: Env) -> Vec<Address> {
-        env.storage().persistent()
-            .get(&ORACLE_WHITELIST)
-            .unwrap_or_else(|| Vec::new(&env))
+    /// Transfers admin rights to `new_admin`.
+    ///
+    /// # Errors
+    /// Returns `ContractError::Unauthorized` if `current_admin` does not match
+    /// the stored admin.
+    pub fn set_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), ContractError> {
+        current_admin.require_auth();
+
+        let admin: Address = env.storage().persistent().get(&ADMIN).expect("not initialized");
+        if admin != current_admin {
+            return Err(ContractError::Unauthorized);
+        }
+
+        env.storage().persistent().set(&ADMIN, &new_admin);
+        Ok(())
+    }
+
+    /// Returns whether the factory is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().persistent().get(&PAUSED).unwrap_or(false)
+    }
+
+    /// Pauses the factory. While paused, `create_market` reverts; existing
+    /// markets are unaffected.
+    ///
+    /// # Errors
+    /// Returns `ContractError::Unauthorized` if `admin` does not match the
+    /// stored admin.
+    pub fn pause_factory(env: Env, admin: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().persistent().set(&PAUSED, &true);
+        Ok(())
+    }
+
+    /// Unpauses the factory, re-enabling `create_market`.
+    ///
+    /// # Errors
+    /// Returns `ContractError::Unauthorized` if `admin` does not match the
+    /// stored admin.
+    pub fn unpause_factory(env: Env, admin: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().persistent().set(&PAUSED, &false);
+        Ok(())
+    }
+
+    fn require_admin(env: &Env, admin: &Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored: Address = env.storage().persistent().get(&ADMIN).expect("not initialized");
+        if stored != *admin {
+            return Err(ContractError::Unauthorized);
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{testutils::{Address as _, Ledger as _}, Env};
 
-    fn setup() -> (Env, MarketFactoryClient<'static>, Address) {
+    // A minimal, dependency-free contract wasm used only to exercise the real
+    // `env.deployer()...deploy_v2()` path in tests. It is not the production
+    // Market contract; it just needs to be *some* valid, deployable wasm.
+    const DUMMY_WASM: &[u8] = include_bytes!("../test_fixtures/dummy.wasm");
+
+    fn setup() -> (Env, MarketFactoryClient<'static>, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
 
-        let contract_id = env.register_contract(None, MarketFactory);
+        let contract_id = env.register(MarketFactory, ());
         let client = MarketFactoryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
 
-        (env, client, admin)
+        (env, client, admin, treasury)
+    }
+
+    fn init(env: &Env, client: &MarketFactoryClient<'static>, admin: &Address, treasury: &Address) {
+        let wasm_hash = env.deployer().upload_contract_wasm(DUMMY_WASM);
+        client.initialize(admin, &wasm_hash, treasury);
+    }
+
+    fn create_default_market(env: &Env, client: &MarketFactoryClient<'static>) -> Bytes {
+        let caller = Address::generate(env);
+        let oracle = Address::generate(env);
+        let now = env.ledger().timestamp();
+        client.create_market(
+            &caller,
+            &String::from_str(env, "Fighter A"),
+            &String::from_str(env, "Fighter B"),
+            &oracle,
+            &(now + 100),
+            &(now + 200),
+        )
+    }
+
+    // ── C-02: initialize ──────────────────────────────────────────────────
+
+    #[test]
+    fn initialize_stores_admin_wasm_hash_and_treasury() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        let wasm_hash = env.deployer().upload_contract_wasm(DUMMY_WASM);
+        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_treasury(), treasury);
+        assert_eq!(client.get_market_wasm_hash(), wasm_hash);
+        assert!(!client.is_paused());
     }
 
     #[test]
-    fn test_initialize() {
-        let (env, client, admin) = setup();
-        let fee_col = Address::generate(&env);
+    fn initialize_twice_fails() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
 
-        client.initialize(&admin, &fee_col, &200u32, &100i128, &100_000i128);
+        let wasm_hash = env.deployer().upload_contract_wasm(DUMMY_WASM);
+        let result = client.try_initialize(&admin, &wasm_hash, &treasury);
+        assert_eq!(result, Err(Ok(ContractError::AlreadyInitialized)));
+    }
 
-        let config = client.get_config();
-        assert_eq!(config.admin, admin);
-        assert_eq!(config.default_fee_bp, 200);
-        assert!(!config.paused);
+    // ── C-03: create_market ───────────────────────────────────────────────
+
+    #[test]
+    fn create_market_happy_path() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        let market_id = create_default_market(&env, &client);
+        let info = client.get_market(&market_id).unwrap();
+
+        assert_eq!(info.market_id, market_id);
+        assert_eq!(info.fighter_a, String::from_str(&env, "Fighter A"));
+        assert_eq!(info.fighter_b, String::from_str(&env, "Fighter B"));
     }
 
     #[test]
-    fn test_initialize_panics_if_called_twice() {
-        let (env, client, admin) = setup();
-        let fee_col = Address::generate(&env);
+    fn create_market_rejects_end_time_in_the_past() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
 
-        client.initialize(&admin, &fee_col, &200u32, &100i128, &100_000i128);
+        let caller = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let now = env.ledger().timestamp();
 
-        let result = std::panic::catch_unwind(|| {
-            client.initialize(&admin, &fee_col, &200u32, &100i128, &100_000i128);
-        });
-        assert!(result.is_err());
+        let result = client.try_create_market(
+            &caller,
+            &String::from_str(&env, "Fighter A"),
+            &String::from_str(&env, "Fighter B"),
+            &oracle,
+            &now,
+            &now, // end_time == now, not in the future
+        );
+        assert_eq!(result, Err(Ok(ContractError::InvalidTimestamp)));
     }
 
     #[test]
-    fn test_pause_and_unpause() {
-        let (env, client, admin) = setup();
-        let fee_col = Address::generate(&env);
-        client.initialize(&admin, &fee_col, &200u32, &100i128, &100_000i128);
+    fn create_market_rejects_lock_time_after_end_time() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        let caller = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let now = env.ledger().timestamp();
+
+        let result = client.try_create_market(
+            &caller,
+            &String::from_str(&env, "Fighter A"),
+            &String::from_str(&env, "Fighter B"),
+            &oracle,
+            &(now + 200), // lock_time
+            &(now + 100), // end_time, before lock_time
+        );
+        assert_eq!(result, Err(Ok(ContractError::InvalidTimestamp)));
+    }
+
+    // ── C-04: get_market ──────────────────────────────────────────────────
+
+    #[test]
+    fn get_market_unknown_id_returns_none() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        let unknown_id = Bytes::from_array(&env, &[9u8; 32]);
+        assert_eq!(client.get_market(&unknown_id), None);
+    }
+
+    #[test]
+    fn get_market_known_id_returns_some() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        let market_id = create_default_market(&env, &client);
+        assert!(client.get_market(&market_id).is_some());
+    }
+
+    // ── C-05: list_markets ──────────────────────────────────────────────────
+
+    #[test]
+    fn list_markets_respects_offset_and_limit_in_creation_order() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        let first = create_default_market(&env, &client);
+        let second = create_default_market(&env, &client);
+        let third = create_default_market(&env, &client);
+
+        let page = client.list_markets(&1, &10);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page.get(0).unwrap().market_id, second);
+        assert_eq!(page.get(1).unwrap().market_id, third);
+
+        let all = client.list_markets(&0, &10);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all.get(0).unwrap().market_id, first);
+    }
+
+    #[test]
+    fn list_markets_caps_limit_at_max_page_size() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        for _ in 0..3 {
+            create_default_market(&env, &client);
+        }
+
+        // Requesting far more than exist and more than MAX_PAGE_SIZE should
+        // just return everything that exists, not panic or overflow.
+        let page = client.list_markets(&0, &1_000);
+        assert_eq!(page.len(), 3);
+    }
+
+    #[test]
+    fn list_markets_out_of_range_offset_returns_empty() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        create_default_market(&env, &client);
+
+        let page = client.list_markets(&50, &10);
+        assert_eq!(page.len(), 0);
+    }
+
+    // ── C-06: list_active_markets ───────────────────────────────────────────
+
+    #[test]
+    fn list_active_markets_filters_by_end_time() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        // A market ending soon...
+        let caller = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let now = env.ledger().timestamp();
+        let soon_ending = client.create_market(
+            &caller,
+            &String::from_str(&env, "Fighter A"),
+            &String::from_str(&env, "Fighter B"),
+            &oracle,
+            &(now + 10),
+            &(now + 20),
+        );
+        // ...and one ending much later.
+        let later_ending = client.create_market(
+            &caller,
+            &String::from_str(&env, "Fighter C"),
+            &String::from_str(&env, "Fighter D"),
+            &oracle,
+            &(now + 1000),
+            &(now + 2000),
+        );
+
+        let active_before = client.list_active_markets();
+        assert_eq!(active_before.len(), 2);
+
+        // Advance the ledger past the first market's end_time.
+        env.ledger().with_mut(|l| l.timestamp = now + 500);
+
+        let active_after = client.list_active_markets();
+        assert_eq!(active_after.len(), 1);
+        assert_eq!(active_after.get(0).unwrap().market_id, later_ending);
+        assert_ne!(active_after.get(0).unwrap().market_id, soon_ending);
+    }
+
+    // ── C-07: set_admin ──────────────────────────────────────────────────────
+
+    #[test]
+    fn set_admin_transfers_admin_rights() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        let new_admin = Address::generate(&env);
+        client.set_admin(&admin, &new_admin);
+
+        assert_eq!(client.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn set_admin_rejects_non_admin_caller() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        let impostor = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        let result = client.try_set_admin(&impostor, &new_admin);
+        assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    // ── C-08: pause_factory / unpause_factory ───────────────────────────────
+
+    #[test]
+    fn pause_and_unpause_factory() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
 
         assert!(!client.is_paused());
-
-        client.pause_protocol(&admin);
+        client.pause_factory(&admin);
         assert!(client.is_paused());
+        client.unpause_factory(&admin);
+        assert!(!client.is_paused());
+    }
 
-        client.unpause_protocol(&admin);
+    #[test]
+    fn create_market_reverts_while_paused() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        client.pause_factory(&admin);
+
+        let caller = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let now = env.ledger().timestamp();
+
+        let result = client.try_create_market(
+            &caller,
+            &String::from_str(&env, "Fighter A"),
+            &String::from_str(&env, "Fighter B"),
+            &oracle,
+            &(now + 100),
+            &(now + 200),
+        );
+        assert_eq!(result, Err(Ok(ContractError::FactoryPaused)));
+    }
+
+    #[test]
+    fn existing_markets_unaffected_by_pause() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        let market_id = create_default_market(&env, &client);
+        client.pause_factory(&admin);
+
+        // Pausing the factory only blocks new creations; previously created
+        // markets remain readable.
+        assert!(client.get_market(&market_id).is_some());
+    }
+
+    #[test]
+    fn pause_factory_rejects_non_admin_caller() {
+        let (env, client, admin, treasury) = setup();
+        init(&env, &client, &admin, &treasury);
+
+        let impostor = Address::generate(&env);
+        let result = client.try_pause_factory(&impostor);
+        assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
         assert!(!client.is_paused());
     }
 }

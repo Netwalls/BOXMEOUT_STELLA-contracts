@@ -1,3 +1,4 @@
+#![no_std]
 //! ============================================================
 //! BOXMEOUT — Shared Types and Errors
 //! All contracts import from this crate.

@@ -104,6 +104,69 @@ impl Treasury {
             .set(&key_wlog(&env), &Vec::<(Address, i128, u64)>::new(&env));
     }
 
+    /// Escrows a bettor's stake on behalf of a registered `Market` contract.
+    ///
+    /// Called by a `Market` contract when a bettor places a bet. Transfers
+    /// `amount` of the configured bet token from `bettor` to this contract and
+    /// credits the treasury balance. Emits a `BetDeposited` event.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban execution environment.
+    /// * `from_market` - Address of the Market contract making the deposit. Must authorize this call.
+    /// * `market_id` - Identifier of the market the bet belongs to.
+    /// * `bettor` - Address of the bettor whose funds are being escrowed.
+    /// * `amount` - Amount of the bet token to escrow, in stroops.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `from_market` has not authorized the call.
+    /// - `from_market` does not match the address registered for `market_id` in the factory.
+    pub fn deposit(env: Env, from_market: Address, market_id: Bytes, bettor: Address, amount: i128) {
+        from_market.require_auth();
+
+        let factory: Address = env
+            .storage()
+            .persistent()
+            .get(&key_factory(&env))
+            .expect("not initialized");
+
+        let registered: Address = env.invoke_contract(
+            &factory,
+            &Symbol::new(&env, "get_market_address"),
+            soroban_sdk::vec![&env, market_id.to_val()],
+        );
+        if registered != from_market {
+            panic!("unauthorized: caller is not a registered market");
+        }
+
+        let token_addr: Address = env
+            .storage()
+            .persistent()
+            .get(&key_token(&env))
+            .expect("token not set");
+        token::Client::new(&env, &token_addr).transfer(
+            &bettor,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        let balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&key_balance(&env))
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&key_balance(&env), &(balance + amount));
+
+        env.events().publish(
+            (Symbol::new(&env, "BetDeposited"),),
+            (from_market, bettor, market_id, amount, env.ledger().timestamp()),
+        );
+    }
+
     /// Receives protocol fees from a registered `Market` contract.
     ///
     /// Only callable by a Market contract address registered with the factory.

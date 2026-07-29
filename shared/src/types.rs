@@ -5,27 +5,28 @@ use soroban_sdk::{contracttype, Address, Bytes, String};
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum MarketStatus {
-    Open,       // Bets are being accepted
-    Locked,     // Fight started — no more bets
-    Resolved,   // Winner declared — claims open
-    Cancelled,  // Fight cancelled — full refunds
-    Disputed,   // Result under admin review — claims frozen
+    Open     = 0, // Bets are being accepted
+    Locked   = 1, // Fight started — no more bets
+    Resolved = 2, // Winner declared — claims open
+    Cancelled = 3, // Fight cancelled — full refunds
+    Disputed  = 4, // Result under admin review — claims frozen
 }
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
-    FighterA,   // Fighter A wins
-    FighterB,   // Fighter B wins
-    Draw,       // Match ends in a draw — status set to Cancelled for full refunds
-    NoContest,  // No contest — DQ or injury ruling
+    FighterA     = 0, // Fighter A wins
+    FighterB     = 1, // Fighter B wins
+    Draw         = 2, // Match ends in a draw — status set to Cancelled for full refunds
+    NoContest    = 3, // No contest — DQ or injury ruling
+    Undetermined = 4, // Not yet resolved
 }
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum BetSide {
-    FighterA,
-    FighterB,
+    FighterA = 0,
+    FighterB = 1,
 }
 
 // ─── STRUCTS ──────────────────────────────────────────────────────────────────
@@ -65,7 +66,28 @@ pub struct Market {
     pub protocol_fee_bp:        u32,
     pub oracle_address:         Address,
     pub fee_collector_address:  Address,
-    pub outcome:                OptionalOutcome,
+    /// `Outcome::Undetermined` until the market is resolved.
+    pub outcome:                Outcome,
+}
+
+/// Full on-chain market record, as tracked by an individual Market contract instance.
+pub type MarketData = Market;
+
+/// Lightweight factory-level summary of a market, as tracked by MarketFactory.
+/// Distinct from `MarketData`/`Market`, which holds the full betting state that
+/// only the deployed Market contract instance itself maintains.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarketInfo {
+    pub market_id:      Bytes,
+    pub market_address: Address,
+    pub creator:        Address,
+    pub fighter_a:       String,
+    pub fighter_b:       String,
+    pub oracle:          Address,
+    pub lock_time:       u64,
+    pub end_time:        u64,
+    pub created_at:      u64,
 }
 
 #[contracttype]
