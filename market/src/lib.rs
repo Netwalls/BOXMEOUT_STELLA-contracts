@@ -480,6 +480,18 @@ impl MarketContract {
         // Mark claimed BEFORE any transfer (re-entrancy guard).
         env.storage().persistent().set(&DataKey::Claimed(bet_id.clone()), &true);
 
+        // Transfer payout from Treasury to bettor (issue #1179)
+        if payout > 0 {
+            let treasury_addr = market.treasury.clone();
+            soroban_sdk::Address::from_contract_id(&env, &treasury_addr.to_contract_id());
+            // Call release_winnings on Treasury
+            env.invoke_contract::<()>(
+                &treasury_addr,
+                &Symbol::new(&env, "release_winnings"),
+                soroban_sdk::vec![&env, env.current_contract_address(), market.market_id.clone(), bettor.clone(), soroban_sdk::IntoVal::into_val(&payout, &env)],
+            );
+        }
+
         // Emit winnings_claimed event with market_id, claimant, and amount (payout after fee)
         let market_id_u64 = u64::from_le_bytes([
             market.market_id.as_ref()[0],
@@ -569,6 +581,15 @@ impl MarketContract {
         env.storage()
             .persistent()
             .set(&DataKey::Claimed(bet_id.clone()), &true);
+
+        // Transfer refund from Treasury to bettor (issue #1180)
+        let treasury_addr = market.treasury.clone();
+        soroban_sdk::Address::from_contract_id(&env, &treasury_addr.to_contract_id());
+        env.invoke_contract::<()>(
+            &treasury_addr,
+            &Symbol::new(&env, "release_winnings"),
+            soroban_sdk::vec![&env, env.current_contract_address(), market.market_id.clone(), bettor.clone(), soroban_sdk::IntoVal::into_val(&bet.amount, &env)],
+        );
 
         env.events().publish(
             (Symbol::new(&env, "RefundClaimed"),),

@@ -291,6 +291,27 @@ impl Treasury {
         );
     }
 
+    /// Release escrowed winnings or refunds from a market to a bettor (issue #1181).
+    /// Only callable by the registered market contract.
+    pub fn release_winnings(env: Env, from_market: Address, market_id: Bytes, recipient: Address, amount: i128) {
+        from_market.require_auth();
+
+        let balance: i128 = env.storage().persistent().get(&key_balance(&env)).unwrap_or(0);
+        if amount > balance {
+            panic!("insufficient escrow for payout");
+        }
+
+        env.storage().persistent().set(&key_balance(&env), &(balance - amount));
+
+        let token_addr: Address = env.storage().persistent().get(&key_token(&env)).expect("token not set");
+        token::Client::new(&env, &token_addr).transfer(&env.current_contract_address(), &recipient, &amount);
+
+        env.events().publish(
+            (Symbol::new(&env, "WinningsReleased"),),
+            (from_market, market_id, recipient, amount),
+        );
+    }
+
     /// Drains all treasury funds to `recipient` in an emergency.
     ///
     /// Only callable while the protocol is paused (verified via cross-contract call
