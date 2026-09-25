@@ -1,11 +1,13 @@
 #![no_std]
 use shared::types::ProtocolConfig;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Bytes, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, Bytes, Env, String, Symbol,
+    Vec,
 };
 
 // ─── STORAGE KEYS ─────────────────────────────────────────────────────────────
 // "ADMIN"           -> Address
+// "PENDING_ADMIN"   -> Address  (two-step admin rotation — C-65)
 // "FACTORY"         -> Address
 // "TOKEN"           -> Address  (XLM token contract)
 // "FEE_BPS"         -> u32 (fee in basis points)
@@ -16,6 +18,10 @@ use soroban_sdk::{
 
 fn key_admin(env: &Env) -> Symbol {
     Symbol::new(env, "ADMIN")
+}
+
+fn key_pending_admin(env: &Env) -> Symbol {
+    Symbol::new(env, "PENDING_ADMIN")
 }
 
 fn key_factory(env: &Env) -> Symbol {
@@ -447,6 +453,178 @@ impl Treasury {
             .get(&key_fee_recipient(&env))
             .expect("not initialized")
     }
+
+    // ─── C-65: Two-step admin rotation ────────────────────────────────────────
+
+    /// Nominates `new_admin` as the pending administrator.
+    ///
+    /// Step 1 of the two-step rotation. The current admin proposes a successor;
+    /// the successor must call [`accept_admin`] to finalise the transfer. Until
+    /// that happens the current admin retains all privileges and the proposal
+    /// can be overwritten by calling `propose_admin` again.
+    ///
+    /// # Arguments
+    ///
+    /// * `env`       - The Soroban execution environment.
+    /// * `admin`     - Current admin address. Must authorize this call.
+    /// * `new_admin` - Candidate address that will become the new admin.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `admin` has not authorized the call or is not the stored admin.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&key_admin(&env))
+            .expect("not initialized");
+        if stored_admin != admin {
+            panic!("not admin");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&key_pending_admin(&env), &new_admin);
+
+        env.events().publish(
+            (Symbol::new(&env, "admin_proposed"),),
+            (admin, new_admin, env.ledger().timestamp()),
+        );
+    }
+
+    /// Completes the two-step admin rotation.
+    ///
+    /// Step 2 of the two-step rotation. The pending admin accepts the proposal,
+    /// becoming the new admin. The `PENDING_ADMIN` entry is cleared on success.
+    ///
+    /// # Arguments
+    ///
+    /// * `env`           - The Soroban execution environment.
+    /// * `pending_admin` - The address that was previously nominated. Must authorize this call.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - No pending admin has been proposed.
+    /// - `pending_admin` has not authorized the call or does not match the stored pending admin.
+    pub fn accept_admin(env: Env, pending_admin: Address) {
+        pending_admin.require_auth();
+
+        let stored_pending: Address = env
+            .storage()
+            .persistent()
+            .get(&key_pending_admin(&env))
+            .expect("no pending admin");
+        if stored_pending != pending_admin {
+            panic!("not pending admin");
+        }
+
+        let old_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&key_admin(&env))
+            .expect("not initialized");
+
+        env.storage()
+            .persistent()
+            .set(&key_admin(&env), &pending_admin);
+        env.storage()
+            .persistent()
+            .remove(&key_pending_admin(&env));
+
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"),),
+            (old_admin, pending_admin, env.ledger().timestamp()),
+        );
+    }
+
+    /// Updates the address that receives protocol fees.
+    ///
+    /// Admin-only. Emits a `fee_recipient_updated` event.
+    ///
+    /// # Arguments
+    ///
+    /// * `env`           - The Soroban execution environment.
+    /// * `admin`         - Current admin address. Must authorize this call.
+    /// * `new_recipient` - Address to receive future fee withdrawals.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `admin` has not authorized the call or is not the stored admin.
+    pub fn set_fee_recipient(env: Env, admin: Address, new_recipient: Address) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&key_admin(&env))
+            .expect("not initialized");
+        if stored_admin != admin {
+            panic!("not admin");
+        }
+
+        let old_recipient: Address = env
+            .storage()
+            .persistent()
+            .get(&key_fee_recipient(&env))
+            .expect("not initialized");
+
+        env.storage()
+            .persistent()
+            .set(&key_fee_recipient(&env), &new_recipient);
+
+        env.events().publish(
+            (Symbol::new(&env, "fee_recipient_updated"),),
+            (old_recipient, new_recipient, env.ledger().timestamp()),
+        );
+    }
+
+    // ─── C-66: set_fee_bps ────────────────────────────────────────────────────
+
+    /// Updates the protocol fee rate in basis points.
+    ///
+    /// Admin-only. Rejects values above 1000 (10%). Emits a `config_updated`
+    /// event using the shared event helper so the indexer receives a uniform
+    /// schema.
+    ///
+    /// # Arguments
+    ///
+    /// * `env`   - The Soroban execution environment.
+    /// * `admin` - Current admin address. Must authorize this call.
+    /// * `bps`   - New fee rate in basis points. Must be ≤ 1000.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `admin` has not authorized the call or is not the stored admin.
+    /// - `bps` exceeds 1000 (10%).
+    pub fn set_fee_bps(env: Env, admin: Address, bps: u32) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&key_admin(&env))
+            .expect("not initialized");
+        if stored_admin != admin {
+            panic!("not admin");
+        }
+
+        if bps > 1000 {
+            panic!("fee_bps exceeds maximum of 1000 (10%)");
+        }
+
+        env.storage().persistent().set(&key_fee_bps(&env), &bps);
+
+        // Emit config_updated with param name "fee_bps" and the new value cast
+        // to i128 so it fits the shared event schema (param_name: String, new_value: i128).
+        env.events().publish(
+            (Symbol::new(&env, "config_updated"),),
+            (String::from_str(&env, "fee_bps"), bps as i128),
+        );
+    }
 }
 
 // ─── TESTS ────────────────────────────────────────────────────────────────────
@@ -656,5 +834,145 @@ mod tests {
 
         // Withdrawing any positive amount from an empty treasury must panic
         client.withdraw_fees(&admin, &recipient, &1);
+    }
+
+    // ─── C-65: propose_admin / accept_admin ───────────────────────────────────
+
+    #[test]
+    fn test_propose_and_accept_admin() {
+        let env = create_test_env();
+        env.mock_all_auths();
+
+        let (client, admin, _) = setup_treasury_with_balance(&env, 0);
+        let new_admin = create_test_address(&env);
+
+        // Propose
+        client.propose_admin(&admin, &new_admin);
+
+        // Accept — new_admin is now the stored admin
+        client.accept_admin(&new_admin);
+
+        // Confirm rotation: only new_admin can call set_fee_bps without panic
+        client.set_fee_bps(&new_admin, &300u32);
+        assert_eq!(client.get_fee_bps(), 300);
+    }
+
+    #[test]
+    #[should_panic(expected = "not admin")]
+    fn test_propose_admin_non_admin_panics() {
+        let env = create_test_env();
+        env.mock_all_auths();
+
+        let (client, _, _) = setup_treasury_with_balance(&env, 0);
+        let random = create_test_address(&env);
+        let candidate = create_test_address(&env);
+
+        client.propose_admin(&random, &candidate);
+    }
+
+    #[test]
+    #[should_panic(expected = "not pending admin")]
+    fn test_accept_admin_wrong_caller_panics() {
+        let env = create_test_env();
+        env.mock_all_auths();
+
+        let (client, admin, _) = setup_treasury_with_balance(&env, 0);
+        let new_admin = create_test_address(&env);
+        let impostor = create_test_address(&env);
+
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&impostor);
+    }
+
+    #[test]
+    #[should_panic(expected = "no pending admin")]
+    fn test_accept_admin_without_proposal_panics() {
+        let env = create_test_env();
+        env.mock_all_auths();
+
+        let (client, _, _) = setup_treasury_with_balance(&env, 0);
+        let random = create_test_address(&env);
+
+        client.accept_admin(&random);
+    }
+
+    // ─── C-65: set_fee_recipient ──────────────────────────────────────────────
+
+    #[test]
+    fn test_set_fee_recipient_updates_address() {
+        let env = create_test_env();
+        env.mock_all_auths();
+
+        let (client, admin, _) = setup_treasury_with_balance(&env, 0);
+        let new_recipient = create_test_address(&env);
+
+        client.set_fee_recipient(&admin, &new_recipient);
+        assert_eq!(client.get_fee_recipient(), new_recipient);
+    }
+
+    #[test]
+    #[should_panic(expected = "not admin")]
+    fn test_set_fee_recipient_non_admin_panics() {
+        let env = create_test_env();
+        env.mock_all_auths();
+
+        let (client, _, _) = setup_treasury_with_balance(&env, 0);
+        let random = create_test_address(&env);
+        let new_recipient = create_test_address(&env);
+
+        client.set_fee_recipient(&random, &new_recipient);
+    }
+
+    // ─── C-66: set_fee_bps ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_fee_bps_updates_value() {
+        let env = create_test_env();
+        env.mock_all_auths();
+
+        let (client, admin, _) = setup_treasury_with_balance(&env, 0);
+        client.set_fee_bps(&admin, &500u32);
+        assert_eq!(client.get_fee_bps(), 500);
+    }
+
+    #[test]
+    fn test_set_fee_bps_at_maximum_boundary() {
+        let env = create_test_env();
+        env.mock_all_auths();
+
+        let (client, admin, _) = setup_treasury_with_balance(&env, 0);
+        client.set_fee_bps(&admin, &1000u32);
+        assert_eq!(client.get_fee_bps(), 1000);
+    }
+
+    #[test]
+    fn test_set_fee_bps_to_zero() {
+        let env = create_test_env();
+        env.mock_all_auths();
+
+        let (client, admin, _) = setup_treasury_with_balance(&env, 0);
+        client.set_fee_bps(&admin, &0u32);
+        assert_eq!(client.get_fee_bps(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "fee_bps exceeds maximum of 1000 (10%)")]
+    fn test_set_fee_bps_above_max_panics() {
+        let env = create_test_env();
+        env.mock_all_auths();
+
+        let (client, admin, _) = setup_treasury_with_balance(&env, 0);
+        client.set_fee_bps(&admin, &1001u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "not admin")]
+    fn test_set_fee_bps_non_admin_panics() {
+        let env = create_test_env();
+        env.mock_all_auths();
+
+        let (client, _, _) = setup_treasury_with_balance(&env, 0);
+        let random = create_test_address(&env);
+        client.set_fee_bps(&random, &100u32);
     }
 }

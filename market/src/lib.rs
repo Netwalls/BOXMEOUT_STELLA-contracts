@@ -27,6 +27,9 @@ pub enum DataKey {
     Claimed(Bytes),
     DisputeRaised,
     DisputeReason,
+    /// Guard flag: set to `true` once `deposit_fees` has been called on the
+    /// Treasury for this market. Prevents double-crediting (C-68).
+    FeeDeposited,
 }
 
 #[contract]
@@ -707,6 +710,11 @@ impl MarketContract {
     /// 1. Permissionless finalization when market is Resolved and dispute window has elapsed
     /// 2. Admin-controlled finalization when market is Disputed (admin-only)
     ///
+    /// On finalization the protocol fee (`calculate_fee(total_pool, protocol_fee_bp)`) is
+    /// credited to the Treasury via a single `deposit_fees` cross-contract call (C-68).
+    /// A `FeeDeposited` storage flag prevents double-crediting if `finalize_resolution`
+    /// is ever called again (e.g. after a dispute override).
+    ///
     /// After finalization, the `claim_winnings` function becomes available.
     /// Emits a `ResolutionFinalized` event.
     ///
@@ -759,6 +767,41 @@ impl MarketContract {
                 Self::write_market(&env, &market);
             }
             _ => panic!("market cannot be finalized in current state"),
+        }
+
+        // ── C-68: Credit protocol fee to Treasury exactly once ────────────────
+        //
+        // The fee was already deducted from claim_winnings payouts; here we
+        // push the corresponding amount into the Treasury fee balance so it is
+        // trackable and withdrawable by the admin.
+        //
+        // The FeeDeposited flag prevents double-crediting if this function is
+        // ever called more than once (e.g. after a dispute override resolved the
+        // market a second time).
+        let fee_already_deposited: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeDeposited)
+            .unwrap_or(false);
+
+        if !fee_already_deposited && market.total_pool > 0 {
+            let fee_amount =
+                shared::types::calculate_fee(market.total_pool, market.protocol_fee_bp);
+            if fee_amount > 0 {
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::FeeDeposited, &true);
+
+                env.invoke_contract::<()>(
+                    &market.treasury,
+                    &Symbol::new(&env, "deposit_fees"),
+                    soroban_sdk::vec![
+                        &env,
+                        market.market_id.clone().into_val(&env),
+                        fee_amount.into_val(&env),
+                    ],
+                );
+            }
         }
 
         env.events().publish(
