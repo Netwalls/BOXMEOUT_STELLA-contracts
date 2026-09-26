@@ -27,6 +27,9 @@ pub enum DataKey {
     Claimed(Bytes),
     DisputeRaised,
     DisputeReason,
+    /// Guard flag: set to `true` once `deposit_fees` has been called on the
+    /// Treasury for this market. Prevents double-crediting (C-68).
+    FeeDeposited,
 }
 
 #[contract]
@@ -480,6 +483,18 @@ impl MarketContract {
         // Mark claimed BEFORE any transfer (re-entrancy guard).
         env.storage().persistent().set(&DataKey::Claimed(bet_id.clone()), &true);
 
+        // Transfer payout from Treasury to bettor (issue #1179)
+        if payout > 0 {
+            let treasury_addr = market.treasury.clone();
+            soroban_sdk::Address::from_contract_id(&env, &treasury_addr.to_contract_id());
+            // Call release_winnings on Treasury
+            env.invoke_contract::<()>(
+                &treasury_addr,
+                &Symbol::new(&env, "release_winnings"),
+                soroban_sdk::vec![&env, env.current_contract_address(), market.market_id.clone(), bettor.clone(), soroban_sdk::IntoVal::into_val(&payout, &env)],
+            );
+        }
+
         // Emit winnings_claimed event with market_id, claimant, and amount (payout after fee)
         let market_id_u64 = u64::from_le_bytes([
             market.market_id.as_ref()[0],
@@ -569,6 +584,15 @@ impl MarketContract {
         env.storage()
             .persistent()
             .set(&DataKey::Claimed(bet_id.clone()), &true);
+
+        // Transfer refund from Treasury to bettor (issue #1180)
+        let treasury_addr = market.treasury.clone();
+        soroban_sdk::Address::from_contract_id(&env, &treasury_addr.to_contract_id());
+        env.invoke_contract::<()>(
+            &treasury_addr,
+            &Symbol::new(&env, "release_winnings"),
+            soroban_sdk::vec![&env, env.current_contract_address(), market.market_id.clone(), bettor.clone(), soroban_sdk::IntoVal::into_val(&bet.amount, &env)],
+        );
 
         env.events().publish(
             (Symbol::new(&env, "RefundClaimed"),),
@@ -707,6 +731,11 @@ impl MarketContract {
     /// 1. Permissionless finalization when market is Resolved and dispute window has elapsed
     /// 2. Admin-controlled finalization when market is Disputed (admin-only)
     ///
+    /// On finalization the protocol fee (`calculate_fee(total_pool, protocol_fee_bp)`) is
+    /// credited to the Treasury via a single `deposit_fees` cross-contract call (C-68).
+    /// A `FeeDeposited` storage flag prevents double-crediting if `finalize_resolution`
+    /// is ever called again (e.g. after a dispute override).
+    ///
     /// After finalization, the `claim_winnings` function becomes available.
     /// Emits a `ResolutionFinalized` event.
     ///
@@ -759,6 +788,41 @@ impl MarketContract {
                 Self::write_market(&env, &market);
             }
             _ => panic!("market cannot be finalized in current state"),
+        }
+
+        // ── C-68: Credit protocol fee to Treasury exactly once ────────────────
+        //
+        // The fee was already deducted from claim_winnings payouts; here we
+        // push the corresponding amount into the Treasury fee balance so it is
+        // trackable and withdrawable by the admin.
+        //
+        // The FeeDeposited flag prevents double-crediting if this function is
+        // ever called more than once (e.g. after a dispute override resolved the
+        // market a second time).
+        let fee_already_deposited: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeDeposited)
+            .unwrap_or(false);
+
+        if !fee_already_deposited && market.total_pool > 0 {
+            let fee_amount =
+                shared::types::calculate_fee(market.total_pool, market.protocol_fee_bp);
+            if fee_amount > 0 {
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::FeeDeposited, &true);
+
+                env.invoke_contract::<()>(
+                    &market.treasury,
+                    &Symbol::new(&env, "deposit_fees"),
+                    soroban_sdk::vec![
+                        &env,
+                        market.market_id.clone().into_val(&env),
+                        fee_amount.into_val(&env),
+                    ],
+                );
+            }
         }
 
         env.events().publish(
