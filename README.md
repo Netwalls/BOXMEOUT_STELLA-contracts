@@ -1,10 +1,10 @@
 # BOXMEOUT Smart Contracts
 
-This directory contains the core smart contracts for the BOXMEOUT boxing prediction market on Stellar/Soroban.
+This repository contains the core smart contracts for the BOXMEOUT boxing prediction market on Stellar/Soroban.
 
 ## Development
 
-Build artifacts in `contracts/target/` are not tracked in git.
+Build artifacts in `target/` are not tracked in git.
 
 ```bash
 cargo test                 # run all contract tests
@@ -13,14 +13,13 @@ stellar contract build     # optimised wasm build (same as CI)
 
 ### Coverage
 
-CI runs [`cargo llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov), uploads an
+The main BOXMEOUT_STELLA repo's CI runs [`cargo llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov), uploads an
 `contracts-lcov` artifact (`lcov.info`) and posts a summary to the job summary.
 To run it locally:
 
 ```bash
 rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov
-cd contracts
 cargo llvm-cov --workspace --summary-only                  # terminal summary
 cargo llvm-cov --workspace --lcov --output-path lcov.info  # lcov report
 cargo llvm-cov --workspace --html --open                   # browsable HTML report
@@ -29,7 +28,7 @@ cargo llvm-cov --workspace --html --open                   # browsable HTML repo
 ### Wasm size limit
 
 CI fails if any optimised `.wasm` exceeds `MAX_WASM_SIZE_BYTES` (65,536 bytes, the
-Soroban contract code size limit), configured in `.github/workflows/contracts-ci.yml`.
+Soroban contract code size limit).
 
 ## Contracts
 
@@ -165,7 +164,7 @@ All three contracts keep every key in **persistent** storage and none extends
 TTLs explicitly, so entries expire to the archive after the network's minimum
 persistent TTL from their last write and must be restored before use. The full
 per-contract key tables (key, value type, storage class, TTL), the TTL strategy
-and operator guidance are in [`docs/contracts.md` → Storage Layout](../docs/contracts.md#storage-layout).
+and operator guidance are in [`docs/contracts.md` → Storage Layout](https://github.com/Netwalls/BOXMEOUT_STELLA/blob/main/docs/contracts.md#storage-layout).
 
 ### Market Storage (summary)
 | Key | Type | Class |
@@ -202,12 +201,12 @@ and operator guidance are in [`docs/contracts.md` → Storage Layout](../docs/co
 `MarketFactory::upgrade_market_wasm` only changes the wasm hash used by future
 `create_market` calls. **Already-deployed markets keep their original code and
 storage**; there is no migration path through the factory. See
-[`docs/contracts.md` → Upgrade Policy](../docs/contracts.md#upgrade-policy).
+[`docs/contracts.md` → Upgrade Policy](https://github.com/Netwalls/BOXMEOUT_STELLA/blob/main/docs/contracts.md#upgrade-policy).
 
 ### Event topics
 
 Canonical event topics and the legacy topics still emitted until C-60/C-61
-land are listed in [`docs/contracts.md` → Event Topics](../docs/contracts.md#event-topics).
+land are listed in [`docs/contracts.md` → Event Topics](https://github.com/Netwalls/BOXMEOUT_STELLA/blob/main/docs/contracts.md#event-topics).
 
 ## Error Handling
 
